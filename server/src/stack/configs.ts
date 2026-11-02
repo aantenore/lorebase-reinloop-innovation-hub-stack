@@ -1,0 +1,85 @@
+// Stack configs of the hub. The shape of a person's stack lives in config/stacks/person.json (one profile per tier);
+// the numbers the game already owns (tier budgets, model params, prompt cache) are laid over it from game.json.
+import { resolve } from 'node:path';
+import { deepMerge, loadConfig, mergeLayers, type AgentConfig, type ResolvedConfig } from '@agent-layers/core';
+import { ROOT, type SimConfig } from '../config.ts';
+import type { Tier } from '../world/types.ts';
+import { cacheParams, type CallParams, type GameConfig } from '../rt/config.ts';
+import { EXT } from './model.ts';
+
+/** Default location of the person stack config; `STACK_PERSON_CONFIG` replaces it. */
+export const PERSON_CONFIG = 'config/stacks/person.json';
+
+/** Environment variable the config reads the data directory from (telemetry file). */
+export const DATA_DIR_ENV = 'HUB_DATA_DIR';
+
+export interface PersonOptions {
+  /** Config file (default `STACK_PERSON_CONFIG` or `config/stacks/person.json`). */
+  file?: string;
+  /** Model of this person (replaces the profile's): `anthropic/<id>` or a bare id. */
+  model?: string;
+  /** Data directory; the telemetry file goes under it. */
+  dataDir?: string;
+  /** Per-agent changes laid over the file's agents (deep merge); a function gets the file's agents. */
+  agents?: Record<string, Partial<AgentConfig>> | ((current: Record<string, AgentConfig>) => Record<string, Partial<AgentConfig>>);
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * The stack config of one person: the profile of its tier, the offline model when `mock`, the person's own model and
+ * the per-agent overlay.
+ */
+export async function loadPersonConfig(tier: Tier, mock: boolean, o: PersonOptions = {}): Promise<ResolvedConfig> {
+  const env = { ...process.env, ...o.env, ...(o.dataDir ? { [DATA_DIR_ENV]: o.dataDir } : {}) };
+  const file = resolve(ROOT, o.file ?? env.STACK_PERSON_CONFIG ?? PERSON_CONFIG);
+  const config = await loadConfig(file, { profile: tier, env });
+  let layers = config.layers;
+  if (o.model) layers = mergeLayers(layers, { model: { options: { model: o.model } } });
+  // The offline model reports `mock/<model>`, like the scripted provider it replaces.
+  if (mock) layers = mergeLayers(layers, { model: { adapter: 'hub-mock', options: { model: `mock/${o.model ?? 'model'}` } } });
+  const change = typeof o.agents === 'function' ? o.agents(config.agents) : o.agents;
+  const agents = change ? deepMerge(config.agents, change) : config.agents;
+  return { ...config, layers, agents };
+}
+
+const paramsOf = (cfg: GameConfig, kind: string): CallParams => (cfg.decisions.modelParams as Record<string, CallParams>)[kind] ?? {};
+
+/**
+ * Per-agent settings the game owns, for the agents of a person's config:
+ * - `decide` and `reply` budgets and output limits from the tier and the conversation settings;
+ * - model params of every agent from its `hub.params` ({ kind: plan|reply|prose, group }): thinking, effort, prompt cache;
+ * - the model of the agents marked `hub.model: "member"` from `groups.memberTier`.
+ * Group capacities keep the budgets of the config file; the group systems tune them from the group size.
+ */
+export function gameAgents(
+  cfg: GameConfig, sim: Pick<SimConfig, 'models' | 'modelOverride'>, tier: Tier, agents: Record<string, AgentConfig>,
+): Record<string, Partial<AgentConfig>> {
+  const tc = cfg.decisions.tiers[tier];
+  const out: Record<string, Partial<AgentConfig>> = {};
+  for (const [name, a] of Object.entries(agents)) {
+    const hub = (a.ext?.['hub.params'] ?? {}) as { kind?: string; group?: boolean };
+    const p = paramsOf(cfg, hub.kind ?? 'prose');
+    const anthropic = {
+      ...(p.thinking ? { thinking: p.thinking } : {}),
+      ...(p.effort ? { effort: p.effort } : {}),
+      ...cacheParams(cfg, hub.group === true),
+    };
+    const ext: Record<string, unknown> = {
+      [EXT.params]: anthropic,
+      ...(p.retryMaxTokens ? { 'reinloop.retryMaxTokens': p.retryMaxTokens } : {}),
+    };
+    const change: Partial<AgentConfig> = { ext };
+    if (a.ext?.['hub.model'] === 'member' && cfg.groups.memberTier) change.model = sim.modelOverride ?? sim.models[cfg.groups.memberTier];
+    if (name === 'decide') {
+      ext['reinloop.budget'] = { maxTurns: tc.maxTurns, maxToolCalls: tc.maxConsults + tc.maxTurns * 4 };
+      change.settings = { maxOutputTokens: tc.maxOutputTokens };
+    } else if (name === 'reply') {
+      const consults = Math.max(0, cfg.conversation.replyMaxConsults);
+      // Consultations, plus rethink and one refused extra call, then the answer.
+      ext['reinloop.budget'] = { maxTurns: cfg.conversation.replyMaxTurns, maxToolCalls: consults + 2 };
+      change.settings = { maxOutputTokens: cfg.conversation.replyMaxOutputTokens };
+    }
+    out[name] = change;
+  }
+  return out;
+}

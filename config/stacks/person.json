@@ -1,0 +1,84 @@
+{
+  "name": "hub-person",
+  "layers": {
+    "model": {
+      "adapter": "hub-anthropic",
+      "options": { "model": "anthropic/claude-sonnet-5-5" }
+    },
+    "runtime": {
+      "adapter": "reinloop",
+      "options": { "budget": { "maxTurns": 8 }, "tools": { "concurrency": 1 } }
+    },
+    "tools": {
+      "world": { "adapter": "hub-tools", "options": { "source": "world" } },
+      "lorebase": { "adapter": "hub-tools", "options": { "source": "lorebase" } }
+    },
+    "telemetry": [
+      { "adapter": "jsonl-telemetry", "options": { "path": "${env:HUB_DATA_DIR:-../../data}/telemetry/stack.jsonl" } }
+    ]
+  },
+  "profiles": {
+    "opus": { "layers": { "model": { "options": { "model": "anthropic/claude-opus-5-5" } } } },
+    "sonnet": { "layers": { "model": { "options": { "model": "anthropic/claude-sonnet-5-5" } } } },
+    "haiku": { "layers": { "model": { "options": { "model": "anthropic/claude-haiku-5-5" } } } }
+  },
+  "agents": {
+    "decide": {
+      "model": "default",
+      "tools": ["world__*", "lorebase__*"],
+      "settings": { "maxOutputTokens": 5000 },
+      "ext": { "hub.params": { "kind": "plan" }, "reinloop.budget": { "maxTurns": 6, "maxToolCalls": 30 } }
+    },
+    "reply": {
+      "model": "default",
+      "tools": ["world__rethink", "lorebase__*"],
+      "settings": { "maxOutputTokens": 400 },
+      "ext": { "hub.params": { "kind": "reply" }, "reinloop.budget": { "maxTurns": 3, "maxToolCalls": 3 } }
+    },
+    "propose": {
+      "model": "default",
+      "tools": ["world__*", "lorebase__*"],
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "hub.model": "member", "reinloop.budget": { "maxTurns": 5 } }
+    },
+    "write": {
+      "model": "default",
+      "tools": ["world__*", "lorebase__*"],
+      "ext": { "hub.params": { "kind": "plan", "group": true }, "reinloop.budget": { "maxTurns": 6 } }
+    },
+    "write_member": {
+      "model": "default",
+      "tools": ["world__*", "lorebase__*"],
+      "ext": { "hub.params": { "kind": "plan", "group": true }, "hub.model": "member", "reinloop.budget": { "maxTurns": 6 } }
+    },
+    "vote": {
+      "model": "default",
+      "tools": ["world__*"],
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "hub.model": "member", "reinloop.budget": { "maxTurns": 2 } }
+    },
+    "ballot": {
+      "model": "default",
+      "tools": ["world__*"],
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "reinloop.budget": { "maxTurns": 2 } }
+    },
+    "chair": {
+      "model": "default",
+      "tools": ["world__*"],
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "reinloop.budget": { "maxTurns": 2 } }
+    },
+    "judge": {
+      "model": "default",
+      "tools": ["world__*"],
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "reinloop.budget": { "maxTurns": 2 } }
+    },
+    "route": {
+      "model": "default",
+      "tools": ["world__*"],
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "reinloop.budget": { "maxTurns": 2 } }
+    },
+    "lead": {
+      "model": "default",
+      "tools": ["world__*", "lorebase__*"],
+      "ext": { "hub.params": { "kind": "plan", "group": true }, "reinloop.budget": { "maxTurns": 8 } }
+    }
+  }
+}
