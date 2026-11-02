@@ -44,7 +44,7 @@ export async function loadPersonConfig(tier: Tier, mock: boolean, o: PersonOptio
 
 const paramsOf = (cfg: GameConfig, kind: string): CallParams => (cfg.decisions.modelParams as Record<string, CallParams>)[kind] ?? {};
 
-/** Group capacities that write (a plan, or a proposal in prose): they use the faculties and the tier's output limit. */
+/** Group capacities that write (a plan, or a proposal in prose): they use the faculties; only the plan writers get the tier's output limit. */
 const WRITING: Record<string, { plan: boolean }> = { lead: { plan: true }, write: { plan: true }, write_member: { plan: true }, propose: { plan: false } };
 /** Group capacities that answer through one record tool: no faculties, the prose output limit. */
 const RECORDING = new Set(['judge', 'route', 'vote']);
@@ -56,8 +56,8 @@ const RECORDING = new Set(['judge', 'route', 'vote']);
  * - `ballot` and `chair` (the committee) turns from `ideas.committee.ballotMaxTurns`;
  * - model params of every agent from its `hub.params` ({ kind: plan|reply|prose, group }): thinking, effort, prompt cache;
  * - the model of the agents marked `hub.model: "member"` from `groups.memberTier`.
- * - the group capacities: output limit (`tier.maxOutputTokens` for those that write plans or proposals, `groups.proseMaxOutputTokens`
- *   for judges, routers and voters) and turns (`groups.maxTurns`, plus the tier's consultations for those that use faculties,
+ * - the group capacities: output limit (`tier.maxOutputTokens` for those that write plans, `groups.proseMaxOutputTokens`
+ *   for proposers in prose, judges, routers and voters) and turns (`groups.maxTurns`, plus the tier's consultations for those that use faculties,
  *   plus one for those that write a plan), on the tier of the model they run on (`groups.memberTier` for the members' ones).
  */
 export function gameAgents(
@@ -101,7 +101,7 @@ export function gameAgents(
       const gt = cfg.decisions.tiers[own];
       const turns = cfg.groups.maxTurns + (writing ? gt.maxConsults + (writing.plan ? 1 : 0) : 0);
       ext['reinloop.budget'] = { maxTurns: turns };
-      change.settings = { maxOutputTokens: writing ? gt.maxOutputTokens : cfg.groups.proseMaxOutputTokens };
+      change.settings = { maxOutputTokens: writing?.plan ? gt.maxOutputTokens : cfg.groups.proseMaxOutputTokens };
     }
     out[name] = change;
   }
