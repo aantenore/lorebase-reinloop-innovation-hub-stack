@@ -416,7 +416,7 @@
     "routeTool": "Choose the member best suited to decide the common plan.",
     "routed": "{name} decides",
     "verdictTool": "Give your verdict on the proposed plan: pass is true only if it is fine as it is; otherwise feedback says what to change, in English.",
-    "voteFormat": "Reply only with JSON: {\"choice\": number of the proposal, \"reason\": \"why, in one sentence\"}."
+    "voteTool": "Vote for the proposal you prefer: choice is its number in the list, reason says why in one sentence."
   },
   "events": {
     "formed": "The group {name} ({pattern}) is born: {members}",

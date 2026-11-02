@@ -10,7 +10,7 @@ import {
 import { createFunctionMember } from '@agent-plexus/adapters/function-member';
 import type { Tool } from 'reinloop';
 import { assemblyOutcome, DECISIONS, unionOf, type Ballot, type ChairDecision } from '../rt/committee.ts';
-import type { PlanData, TraceRole } from '../rt/groups.ts';
+import type { PlanData, ProposalVote, TraceRole } from '../rt/groups.ts';
 import type { CommitteeDecision, CommitteeVote } from '../rt/ideas.ts';
 import { weightedWinner } from '../rt/society.ts';
 import { tally } from '../rt/vote.ts';
@@ -176,6 +176,7 @@ const messagesOf = (b: Briefing): RunInput | string => (b.system
   : b.task);
 
 const isBallot = (r: unknown): r is Ballot => !!r && typeof r === 'object' && 'vote' in r && DECISIONS.includes((r as Ballot).vote);
+const isProposalVote = (r: unknown): r is ProposalVote => !!r && typeof r === 'object' && 'choice' in r && Number.isInteger((r as ProposalVote).choice);
 const isChair = (r: unknown): r is ChairDecision => !!r && typeof r === 'object' && 'decision' in r && DECISIONS.includes((r as ChairDecision).decision);
 
 /** What a committee step handed on, read back from its output (the votes cast, the decision once made). */
@@ -297,8 +298,9 @@ async function personCall(env: MemberEnv, spec: PersonSpec, input: RunInput, cal
     return done(JSON.stringify(out), { 'hub.decision': d.decision }, res);
   }
 
-  // vote: the choice and the reason as one line of JSON; no valid choice is an abstention
-  const vote = choiceOf(res?.run.output ?? '');
+  // vote: the choice recorded by vota_proposta (or, failing that, a line of JSON in the answer); no valid choice is an abstention
+  const recorded = ended && res && isProposalVote(res.record) ? { choice: res.record.choice, reason: res.record.reason } : undefined;
+  const vote = recorded ?? choiceOf(res?.run.output ?? '');
   if (!vote) return done('', { 'hub.vote': 'abstain' }, res);
   const out = JSON.stringify(vote);
   say(spec.role, out);

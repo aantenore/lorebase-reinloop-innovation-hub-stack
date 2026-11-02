@@ -4,24 +4,24 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { assemble, mergeConfig, resolveConfig, type System } from '@agent-plexus/core';
+import { assemble, mergeConfig, prototypeHost, resolveConfig, type System } from '@agent-plexus/core';
 import {
   compose, type CallContext, type Message, type RunEvent, type RunInput, type RunResult, type Stack,
 } from '@agent-layers/core';
 import type { Tool } from 'reinloop';
 import type { Ballot, ChairDecision } from '../rt/committee.ts';
 import { decisionTier, faculties, ideaTools, tierConfig, type DecideHost } from '../rt/decide.ts';
-import type { Group, PlanData } from '../rt/groups.ts';
+import type { Group, PlanData, ProposalVote } from '../rt/groups.ts';
 import { ROOT } from '../config.ts';
 import type { RtEntity } from '../rt/world.ts';
 import { DATA_DIR_ENV, gameAgents, loadPersonConfig } from './configs.ts';
-import { feedTelemetry, type PersonRef, type StackFeed } from './feed.ts';
+import { feedTelemetry, plexusTelemetry, type PersonRef, type RunEndEvent, type StackFeed } from './feed.ts';
 import { MockScripts, modelAdapters, Transcripts, type MockScript } from './model.ts';
 import { GroupRuns, hubLoader } from './members.ts';
 import { CAPTURE, Scratch, ScratchEntry, toolAdapters, worldToolDefs } from './tools.ts';
 import { topologyFor, type Roster, type SystemKind } from './topologies.ts';
 
-export { StackFeed, feedTelemetry, type PersonRef, type ReasoningEvent, type TelemetryEvent, type UsageEvent } from './feed.ts';
+export { StackFeed, SpanTally, feedTelemetry, plexusTelemetry, type PersonRef, type ReasoningEvent, type RunEndEvent, type SpanSummary, type TelemetryEvent, type UsageEvent } from './feed.ts';
 export { loadPersonConfig } from './configs.ts';
 export { committeeData, GroupRuns, type Briefing, type BriefCall, type CommitteeOutcomeData, type CommitteeRun, type GroupRun } from './members.ts';
 export { topologyFor, type Roster, type SystemKind } from './topologies.ts';
@@ -45,8 +45,8 @@ export interface CapResult {
   run: RunResult;
   /** Plan of the `commit_plan` call that ended the run. */
   plan?: PlanData;
-  /** Ballot or chair decision of the record tool that ended the run. */
-  record?: Ballot | ChairDecision;
+  /** Ballot, chair decision or assembly vote of the record tool that ended the run. */
+  record?: Ballot | ChairDecision | ProposalVote;
   verdict?: { pass: boolean; feedback: string };
   delegate?: { member: string; input?: string };
   handoff?: string;
@@ -118,10 +118,12 @@ class Person implements PersonStack {
   readonly scratch: Scratch;
   readonly #scripts: MockScripts;
   readonly #transcripts: Transcripts;
+  readonly #feed: StackFeed;
   #seq = 0;
 
-  constructor(person: PersonRef, stack: Stack, scratch: Scratch, scripts: MockScripts, transcripts: Transcripts) {
+  constructor(person: PersonRef, stack: Stack, scratch: Scratch, scripts: MockScripts, transcripts: Transcripts, feed: StackFeed) {
     this.person = person;
+    this.#feed = feed;
     this.stack = stack;
     this.scratch = scratch;
     this.#scripts = scripts;
@@ -138,10 +140,19 @@ class Person implements PersonStack {
   async #drive(cap: Capacity, o: RunOpts, runId: string, go: (init: Partial<CallContext>) => Promise<RunResult>): Promise<CapResult> {
     const { entry, release } = await this.scratch.acquire(o.sessionId, cap, o.tools);
     if (o.mock) this.#scripts.set(runId, o.mock);
+    const startedAt = Date.now();
+    let status = 'failed';
+    let reason: RunEndEvent['reason'];
     try {
       const run = await go({ runId, sessionId: o.sessionId, ...(o.signal ? { signal: o.signal } : {}) });
+      status = run.status;
+      if (run.reason) reason = { code: String(run.reason.code), ...(run.reason.detail ? { detail: String(run.reason.detail) } : {}) };
       return { run, ...captured(entry), ...this.#transcript(runId) };
+    } catch (err) {
+      reason = { code: 'error', detail: err instanceof Error ? err.message : String(err) };
+      throw err;
     } finally {
+      this.#feed.emit('run', { person: this.person, runId, agent: cap, status, ...(reason ? { reason } : {}), startedAt, durationMs: Date.now() - startedAt });
       this.#scripts.delete(runId);
       this.#transcripts.forget(runId);
       release();
@@ -215,7 +226,7 @@ function captured(entry: ScratchEntry): Omit<CapResult, 'run' | 'transcript'> {
     if (slot === 'plan') {
       if (s.data) out.plan = s.data as PlanData;
     } else if (slot === 'rethink') out.rethink = true;
-    else if (slot === 'record') out.record = s.data as Ballot | ChairDecision;
+    else if (slot === 'record') out.record = s.data as Ballot | ChairDecision | ProposalVote;
     else if (slot === 'verdict') out.verdict = s.data as { pass: boolean; feedback: string };
     else if (slot === 'delegate') out.delegate = (s.data as { member: string; input?: string } | undefined) ?? { member: s.text };
     else if (slot === 'handoff') out.handoff = typeof s.data === 'string' ? s.data : s.text;
@@ -281,7 +292,7 @@ export class StackHub {
       ],
       telemetry: [feedTelemetry(this.feed, person)],
     });
-    return new Person(person, stack, scratch, scripts, transcripts);
+    return new Person(person, stack, scratch, scripts, transcripts, this.feed);
   }
 
   /**
@@ -316,7 +327,8 @@ export class StackHub {
     const env = { ...process.env, [DATA_DIR_ENV]: this.dataDir };
     const limits = def.limits ? mergeConfig(raw.limits, { system: def.limits }) : raw.limits;
     const config = resolveConfig({ ...raw, system: { name: `${g.id}-${kind}` }, members: def.members, topology: def.topology, ...(limits ? { limits } : {}) }, { cwd: dirname(file), file, env });
-    const system = await assemble(config, { resolveAdapter: hubLoader({ stackFor: (e) => this.stackFor(e), runs: this.runs }), quiet: true, env });
+    const host = { ...prototypeHost({ quiet: true }), telemetry: plexusTelemetry(this.feed) };
+    const system = await assemble(config, { host, resolveAdapter: hubLoader({ stackFor: (e) => this.stackFor(e), runs: this.runs }), quiet: true, env });
     return guarded(system);
   }
 

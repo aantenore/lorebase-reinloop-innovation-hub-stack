@@ -91,6 +91,40 @@ test('a failing member does not fail the parallel node it sits in', async () => 
   }
 });
 
+test('assembly voters record their choice with vota_proposta; a free-text JSON answer still counts', async () => {
+  const g = group('assembly');
+  const real = hub.stackFor.bind(hub);
+  const recorded: unknown[] = [];
+  let text = false;
+  hub.stackFor = async (e) => {
+    const ps = await real(e);
+    return new Proxy(ps, {
+      get: (t, k) => (k === 'run' ? async (...a: Parameters<typeof ps.run>) => {
+        const res = await ps.run(...a);
+        if (a[0] === 'vote') {
+          recorded.push(res.record);
+          // the first voter answers in prose instead of the tool
+          if (!text) {
+            text = true;
+            return { run: { ...res.run, output: '{"choice": 1, "reason": "testo"}' } };
+          }
+        }
+        return res;
+      } : Reflect.get(t, k)),
+    });
+  };
+  try {
+    valid(await manager.decide(g, 'test'));
+  } finally {
+    hub.stackFor = real;
+  }
+  assert.ok(recorded.length >= 2);
+  assert.ok(recorded.every((r) => r && typeof (r as { choice: unknown }).choice === 'number'), 'the offline voters call the record tool');
+  const votes = deliberations.filter((d) => d.includes(':voter:#'));
+  assert.ok(votes.length >= 2, votes.join(' | '));
+  assert.ok(votes.some((v) => v.endsWith('#1: testo')), 'the free-text vote is counted too');
+});
+
 test('a judge that fails the first round sends the council back for a revision; the last plan stands when rounds run out', async () => {
   const g = group('council');
   const plan = valid(await manager.decide(g, 'test'));

@@ -176,7 +176,7 @@ test('evidence: written on the idea branch, one per URL, a validation per person
   assert.ok(events.includes('evidence:1'));
 });
 
-test('a deferred idea keeps the committee run that waits for its resubmission, in memory only', async () => {
+test('a deferred idea keeps the committee run that waits for its resubmission, in its record', async () => {
   const { client } = fakeClient();
   const book = new IdeaBook(client, 'main', cfg, 's1', { changed: () => undefined });
   const idea = await book.create('Livia', { title: 'Rinvio', ...full }, { at, quarter: 'Q1', signals: [], maxOpen: 3 });
@@ -184,15 +184,26 @@ test('a deferred idea keeps the committee run that waits for its resubmission, i
   book.review(idea.code, 'Dario', { impact: 8, feasibility: 6, novelty: 7, fit: 8, risk: 3 }, 'bene', at);
   book.review(idea.code, 'Sara', { impact: 6, feasibility: 6, novelty: 5, fit: 7, risk: 4 }, 'ok', at);
   await book.submit(idea.code, 'Livia', { at, clock: 0, minReviewers: 2 });
+  // An idea that never had a run writes none.
+  book.setCommitteeRun(idea.code, null);
+  assert.equal(book.get(idea.code)!.committeeRun, undefined);
+  assert.ok(!('committee_run' in ideaRow(book.get(idea.code)!, 's1')));
   const run = { runId: 'g1:1:0:abc', configHash: 'f00dfeed', wait: 'call#0' };
   book.setCommitteeRun(idea.code, run);
   const out = book.decide(idea.code, 'defer', 'dati', [], at, 'Dario');
   assert.ok(typeof out !== 'string' && out.stage === 'proposal');
   assert.deepEqual(book.get(idea.code)!.committeeRun, run);
-  // Only the idea's own record is written: the run is the server's, and a restart does not bring it back.
-  assert.ok(!JSON.stringify(ideaRow(out, 's1')).includes('g1:1:0:abc'));
-  assert.equal(ideaFromRecord({ key: idea.code, values: JSON.parse(JSON.stringify(ideaRow(out, 's1'))) }).committeeRun, undefined);
+  // The record carries the run, and the idea read back after a restart waits on it.
+  const row = JSON.parse(JSON.stringify(ideaRow(out, 's1')));
+  assert.deepEqual(row.committee_run, run);
+  assert.deepEqual(ideaFromRecord({ key: idea.code, values: row }).committeeRun, run);
+  // Let go: the record says so, and a malformed run reads back as none.
   book.setCommitteeRun(idea.code, null);
   assert.equal(book.get(idea.code)!.committeeRun, null);
+  const cleared = JSON.parse(JSON.stringify(ideaRow(book.get(idea.code)!, 's1')));
+  assert.deepEqual(cleared.committee_run, {});
+  assert.equal(ideaFromRecord({ key: idea.code, values: cleared }).committeeRun, undefined);
+  assert.equal(ideaFromRecord({ key: idea.code, values: { ...cleared, committee_run: '{"runId":5}' } }).committeeRun, undefined);
+  assert.deepEqual(ideaFromRecord({ key: idea.code, values: { ...cleared, committee_run: JSON.stringify(run) } }).committeeRun, run);
   book.setCommitteeRun('unknown', run);
 });

@@ -213,6 +213,7 @@ export const CAPTURE: Readonly<Record<string, 'plan' | 'rethink' | 'record' | 'v
   commit_plan: 'plan',
   rethink: 'rethink',
   vota_idea: 'record',
+  vota_proposta: 'record',
   decide_idea: 'record',
   verdetto: 'verdict',
   delega: 'delegate',

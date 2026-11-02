@@ -139,6 +139,40 @@ test('another membership cannot replay the old run: a new run starts', async () 
   assert.deepEqual([calls.votes, calls.chair], [6, 2]);
 });
 
+test('a run the idea lets go (another config, a lost run) is cancelled first when plexus can; without cancel the new run just starts', async () => {
+  const { hub, manager } = boot();
+  const { g, members } = committee(manager);
+  const { mock } = scripted(['defer', 'approve']);
+  const first = ok(await manager.reviewIdea(g, 'brief', mock, members, undefined, { idea: 'idea-8' }));
+  assert.equal(first.waiting, true);
+
+  const cancelled: Array<{ id: string; by: string; reason: string }> = [];
+  const real = hub.systemFor.bind(hub);
+  hub.systemFor = async (...a) => {
+    const system = await real(...a);
+    return { ...system, cancel: async (id: string, o: { by: string; reason: string }) => void cancelled.push({ id, ...o }) } as typeof system;
+  };
+  try {
+    mock.next();
+    const reseated = [members[1]!, members[0]!, members[2]!];
+    const second = ok(await manager.resumeReview(g, first, 'brief', mock, reseated, undefined, 'idea-8'));
+    assert.notEqual(second.runId, first.runId);
+    assert.deepEqual(cancelled.map((c) => [c.id, c.reason]), [[first.runId, 'config changed']]);
+
+    cancelled.length = 0;
+    const lost = ok(await manager.resumeReview(g, { ...second, runId: 'gone' }, 'brief', mock, reseated, undefined, 'idea-8'));
+    assert.notEqual(lost.runId, 'gone');
+    assert.deepEqual(cancelled.map((c) => [c.id, c.reason]), [['gone', 'run lost']]);
+
+    // A cancel that throws never stops the new run.
+    hub.systemFor = async (...a) => ({ ...(await real(...a)), cancel: async () => { throw new Error('refused'); } }) as never;
+    const again = ok(await manager.resumeReview(g, { ...lost, configHash: 'other' }, 'brief', mock, reseated, undefined, 'idea-8'));
+    assert.ok(again.runId);
+  } finally {
+    hub.systemFor = real;
+  }
+});
+
 test('a run that used up its deferrals starts anew', async () => {
   const cc = host.cfg.ideas.committee;
   const keep = cc.maxDeferrals;

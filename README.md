@@ -125,12 +125,39 @@ flowchart LR
   vote with structured output, the chair decides; an assembly decides by esteem-weighted plurality).
 - `server/src/rt/decide.ts`, `mind.ts`, `prompt.ts`: one decision loop per person, tools, observation.
 - `server/src/rt/game.ts`: the host: policies from Lorebase, ideas, committee, protocol, REST.
+- `server/src/stack/`: the agent stack (next section).
 - `lorebase/`: schema, policies and roles, signals, methods and breakthroughs.
+
+### Agent stack
+
+Thinking runs on agent-layers and agent-plexus,
+with reinloop as the runtime of each agent and Lorebase as the knowledge. `StackHub` (`server/src/stack/`) builds one
+agent-layers stack per person from `config/stacks/person.json` (profile = tier; one agent per capacity: decide, reply,
+propose, write, vote, ballot, chair, ...), with the model (Anthropic through reinloop's provider, prompt cache and
+thinking kept), the world's tools, the Lorebase read tools (branch and domain pinned by the hub, never by the model) and
+telemetry (`data/telemetry/stack.jsonl`). Group decisions are agent-plexus systems over the members' own stacks
+(`stack/topologies.ts`: orchestrator, council, router, chain, mentor, assembly; the committee is a graph that waits
+for the resubmission of a deferred idea; journal in `data/plexus/journal.db`, base config `config/plexus/base.json`).
+The idea keeps its waiting committee run in its Lorebase record (`committee_run`), so a deferral survives a restart;
+re-apply the schema (`npm run lorebase:seed`) once for that attribute.
+
+What the stacks report (usage with cache counts and price, reasoning, finished runs, spans) goes through one
+`StackFeed` to the usage ledger of the Observatory, the thoughts shown to privileged clients, the mnemo run store and a
+privileged `{type:'stack'}` WebSocket message (span totals of `agent.*` and `plexus.*`).
+
+- `npm run stack:pin` rebuilds the vendored agent-layers / agent-plexus tarballs from the sibling checkouts
+  (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF=HEAD` builds the committed state) and rewrites `package.json`.
+  When the packages are on npm, replace the `file:` entries with ranges and drop `vendor/` and the script.
+- Mock vs live: without `ANTHROPIC_API_KEY` (or with `--mock`) every stack runs on the offline `hub-mock` model, which
+  calls the same scripted decisions as before and still goes through the whole stack (tools, plexus, feed). Live uses
+  `hub-anthropic`. Files go to `stack.dataDir` (`config/game.json`, default `data/`; `HUB_DATA_DIR` replaces it).
+- Where to look: `docs/agent-stack-port.md` (design and decisions).
 
 ## Quickstart
 
 Requirements: Node >= 22.18, Docker, the `lorebase` checkout next to this one (Keeper and Herald are built
-from it). reinloop is pinned in `vendor/`.
+from it). reinloop comes from npm; agent-layers and agent-plexus (not published yet) are vendored as tarballs in
+`vendor/` (see Agent stack).
 
 ```bash
 npm install

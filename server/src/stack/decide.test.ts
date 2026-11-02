@@ -10,7 +10,7 @@ import { closableRun, closingMessages, decide, isFailure, reply, type DecideHost
 import { loadGameConfig } from '../rt/config.ts';
 import { Game } from '../rt/game.ts';
 import type { RtEntity } from '../rt/world.ts';
-import { StackFeed, StackHub, type CapResult, type Capacity, type RunOpts } from './index.ts';
+import { StackFeed, type StackHub, type CapResult, type Capacity, type RunOpts } from './index.ts';
 
 const dataDir = mkdtempSync(join(tmpdir(), 'hub-decide-'));
 after(() => rmSync(dataDir, { recursive: true, force: true }));
@@ -18,34 +18,36 @@ after(() => rmSync(dataDir, { recursive: true, force: true }));
 // ---------------------------------------------------------------------------------------------------------------
 // End to end on the offline model: the game's own decide host, the real hub.
 
+/** Lets the span of a finished run reach the feed's listeners. */
+const settled = () => new Promise((r) => setTimeout(r, 20));
+
 function world() {
   const sim = loadConfig(['--mock'], {});
   const game = loadGameConfig({});
-  const g = new Game(sim, { ...game, mock: { ...game.mock, thinkDelayMs: 0, replyDelayMs: 0 } });
+  const g = new Game(sim, { ...game, stack: { dataDir }, mock: { ...game.mock, thinkDelayMs: 0, replyDelayMs: 0 } });
   g.world.rules = new Proxy({}, { get: () => 1 }) as typeof g.world.rules;
   const host = (g as unknown as { decideHost(): DecideHost }).decideHost();
-  const hub = new StackHub(host, { mock: true, feed: new StackFeed(), dataDir });
-  host.stacks = hub;
-  const ran: Array<{ status: string; usage?: unknown; costUsd?: number }> = [];
-  const reasons: string[] = [];
-  const base = host.ranModel;
-  host.ranModel = (who, res) => { ran.push(res); base(who, res); };
-  host.reasoned = (_e, text) => void reasons.push(text);
+  // The game's own hub: its feed books usage, runs and reasoning in the game's ledger.
+  const hub = g.stacks;
+  assert.equal(host.stacks, hub);
   host.recall = async () => [];
   const spawn = (name: string) => g.world.spawn({ name, role: 'elder', tier: 'haiku', model: 'mock', kind: 'agent' }) as RtEntity;
-  return { g, host, hub, ran, reasons, spawn };
+  return { g, host, hub, spawn };
 }
 
 test('decide on the offline model commits a plan through the stack and counts its usage', async () => {
-  const { g, host, hub, ran, spawn } = world();
+  const { g, host, hub, spawn } = world();
   try {
-    const out = await decide(host, spawn('Mara Bianca'), 'test');
+    const mara = spawn('Mara Bianca');
+    const out = await decide(host, mara, 'test');
     assert.ok(!isFailure(out), isFailure(out) ? out.error : '');
     assert.ok(out.steps.length > 0);
     assert.equal(typeof out.reason, 'string');
-    assert.equal(ran.length, 1);
-    assert.equal(ran[0]!.status, 'completed');
-    assert.ok((ran[0]!.usage as { inputTokens: number }).inputTokens > 0);
+    // Counted once, by the feed: one run, no failure, its tokens.
+    await settled();
+    const row = g.usage.rows.get(mara.id)!;
+    assert.deepEqual([row.runs, row.failures], [1, 0]);
+    assert.ok(row.inputTokens > 0);
   } finally {
     g.stopLoop();
     await hub.close();
@@ -53,7 +55,7 @@ test('decide on the offline model commits a plan through the stack and counts it
 });
 
 test('reply on the offline model streams its words and ends', async () => {
-  const { g, host, hub, ran, spawn } = world();
+  const { g, host, hub, spawn } = world();
   try {
     const a = spawn('Mara Bianca');
     const b = spawn('Luca Rossi');
@@ -63,7 +65,8 @@ test('reply on the offline model streams its words and ends', async () => {
     assert.equal(out.rethink, false);
     assert.ok(out.text.length > 0);
     assert.equal(deltas.join('').trim(), out.text);
-    assert.equal(ran.length, 1);
+    await settled();
+    assert.equal(g.usage.rows.get(a.id)!.runs, 1);
   } finally {
     g.stopLoop();
     await hub.close();
@@ -214,7 +217,7 @@ test('no closing turn when a plan was committed, when the run was aborted, or on
 });
 
 test('reply: words are one answer across consultations, a cut-off or silent run is told apart, rethink says nothing after', async () => {
-  const { g, host, hub, ran, spawn } = world();
+  const { g, host, hub, spawn } = world();
   try {
     const a = spawn('Mara Bianca');
     const b = spawn('Luca Rossi');
@@ -230,7 +233,6 @@ test('reply: words are one answer across consultations, a cut-off or silent run 
     const out = await reply(host, a, b, (d) => deltas.push(d));
     assert.equal(out.text, 'Un attimo ecco fatto');
     assert.deepEqual(deltas, ['Un attimo', ' ', 'ecco', ' fatto']);
-    assert.equal(ran.length, 1);
 
     scripted(host, async () => ({ events: [{ type: 'text', text: 'Pronto' }], result: { run: { ...run('r', 'completed'), reason: { code: 'limit', detail: 'max_tokens' } } } }));
     const cut = await reply(host, a, b, () => undefined);

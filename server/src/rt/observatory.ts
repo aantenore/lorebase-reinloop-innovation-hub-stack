@@ -78,17 +78,36 @@ export interface CacheStats {
 
 const round = (n: number, digits = 6) => Math.round(n * 10 ** digits) / 10 ** digits;
 
+type Who = { id: string; name: string; model: string; tier: string; tool?: string };
+
 export class UsageLedger {
   readonly rows = new Map<string, UsageRow>();
-  track(who: { id: string; name: string; model: string; tier: string; tool?: string }, res: RunUsage): void {
-    const row = this.rows.get(who.id) ?? { agentId: who.id, name: who.name, model: who.model, tier: who.tier, tool: who.tool ?? 'minds', runs: 0, failures: 0, ...zeroTokens(), costUsd: 0, cacheSavedUsd: 0 };
+  private row(who: Who): UsageRow {
+    let row = this.rows.get(who.id);
+    if (!row) {
+      row = { agentId: who.id, name: who.name, model: who.model, tier: who.tier, tool: who.tool ?? 'minds', runs: 0, failures: 0, ...zeroTokens(), costUsd: 0, cacheSavedUsd: 0 };
+      this.rows.set(who.id, row);
+    }
+    return row;
+  }
+  /** One run ended (failed unless it completed, was stopped or interrupted). */
+  ended(who: Who, status: string): void {
+    const row = this.row(who);
     row.runs++;
-    if (!['completed', 'stopped', 'interrupted'].includes(res.status)) row.failures++;
-    const t = tokensOf(res.usage);
+    if (!['completed', 'stopped', 'interrupted'].includes(status)) row.failures++;
+  }
+  /** One model call: its tokens (cache counts included), price and what caching saved on it. */
+  called(who: Who, usage: TokenUsage | undefined, costUsd = 0): void {
+    const row = this.row(who);
+    const t = tokensOf(usage);
     for (const k of TOKEN_KEYS) row[k] += t[k];
-    row.costUsd += res.costUsd ?? 0;
+    row.costUsd += costUsd;
     row.cacheSavedUsd += cacheSavingsUsd(who.model, t);
-    this.rows.set(who.id, row);
+  }
+  /** A whole run at once: for callers that only know its end (tools with a model call of their own). */
+  track(who: Who, res: RunUsage): void {
+    this.ended(who, res.status);
+    this.called(who, res.usage, res.costUsd);
   }
   totalUsd(): number {
     let sum = 0;
@@ -174,6 +193,8 @@ export interface ObservatoryHost {
   revision(): string;
   agents(): Array<{ id: string; name: string; key: string }>;
   stats(): Record<string, number | Record<string, number>>;
+  /** Spans of the agent stacks and group systems added up by name. */
+  stack?(): Record<string, { count: number; errors: number; totalMs: number; maxMs: number }>;
   usage: UsageLedger;
 }
 
@@ -271,6 +292,7 @@ export class Observatory {
         costUsd: { total: Math.round(rows.reduce((s, r) => s + r.costUsd, 0) * 1e6) / 1e6, byModel: usd(u.by('model')), byTier: usd(u.by('tier')), byTool: this.byTool() },
         cache: { ...u.cache(), byModel: u.cacheBy('model'), byTier: u.cacheBy('tier') },
       },
+      ...(this.host.stack ? { stack: { spans: this.host.stack() } } : {}),
     };
   }
 

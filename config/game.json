@@ -576,6 +576,9 @@
       "pollMs": 500
     }
   },
+  "stack": {
+    "dataDir": "data"
+  },
   "observatory": {
     "cacheMs": 5000,
     "maxLimit": 200,

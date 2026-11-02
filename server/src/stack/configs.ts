@@ -44,6 +44,11 @@ export async function loadPersonConfig(tier: Tier, mock: boolean, o: PersonOptio
 
 const paramsOf = (cfg: GameConfig, kind: string): CallParams => (cfg.decisions.modelParams as Record<string, CallParams>)[kind] ?? {};
 
+/** Group capacities that write (a plan, or a proposal in prose): they use the faculties and the tier's output limit. */
+const WRITING: Record<string, { plan: boolean }> = { lead: { plan: true }, write: { plan: true }, write_member: { plan: true }, propose: { plan: false } };
+/** Group capacities that answer through one record tool: no faculties, the prose output limit. */
+const RECORDING = new Set(['judge', 'route', 'vote']);
+
 /**
  * Per-agent settings the game owns, for the agents of a person's config:
  * - `decide`, `decide_close` (the closing run of a decision) and `reply` budgets and output limits from the tier, the
@@ -51,7 +56,9 @@ const paramsOf = (cfg: GameConfig, kind: string): CallParams => (cfg.decisions.m
  * - `ballot` and `chair` (the committee) turns from `ideas.committee.ballotMaxTurns`;
  * - model params of every agent from its `hub.params` ({ kind: plan|reply|prose, group }): thinking, effort, prompt cache;
  * - the model of the agents marked `hub.model: "member"` from `groups.memberTier`.
- * Group capacities keep the budgets of the config file; the group systems tune them from the group size.
+ * - the group capacities: output limit (`tier.maxOutputTokens` for those that write plans or proposals, `groups.proseMaxOutputTokens`
+ *   for judges, routers and voters) and turns (`groups.maxTurns`, plus the tier's consultations for those that use faculties,
+ *   plus one for those that write a plan), on the tier of the model they run on (`groups.memberTier` for the members' ones).
  */
 export function gameAgents(
   cfg: GameConfig, sim: Pick<SimConfig, 'models' | 'modelOverride'>, tier: Tier, agents: Record<string, AgentConfig>,
@@ -86,6 +93,15 @@ export function gameAgents(
     } else if (name === 'ballot' || name === 'chair') {
       // A ballot or decision the policy refuses can be recorded again.
       ext['reinloop.budget'] = { maxTurns: cfg.ideas.committee.ballotMaxTurns ?? 3 };
+      change.settings = { maxOutputTokens: cfg.groups.proseMaxOutputTokens };
+    }
+    const writing = WRITING[name];
+    if (writing || RECORDING.has(name)) {
+      const own = a.ext?.['hub.model'] === 'member' && cfg.groups.memberTier ? cfg.groups.memberTier : tier;
+      const gt = cfg.decisions.tiers[own];
+      const turns = cfg.groups.maxTurns + (writing ? gt.maxConsults + (writing.plan ? 1 : 0) : 0);
+      ext['reinloop.budget'] = { maxTurns: turns };
+      change.settings = { maxOutputTokens: writing ? gt.maxOutputTokens : cfg.groups.proseMaxOutputTokens };
     }
     out[name] = change;
   }

@@ -19,7 +19,7 @@
 import {
   type MockTurn, type ModelRequest, type RunResult, type Tool, tool,
 } from 'reinloop';
-import type { SystemResult } from '@agent-plexus/core';
+import type { System, SystemResult } from '@agent-plexus/core';
 import type { Translate } from '../i18n.ts';
 import type { GameConfig, GroupPattern } from './config.ts';
 import { AGENT_PATTERNS } from './config.ts';
@@ -118,12 +118,19 @@ const SEP = '__';
 const VERDICT = { type: 'object', properties: { pass: { type: 'boolean' }, feedback: { type: 'string' } }, required: ['pass', 'feedback'] };
 /** Arguments of the supervisor's and the router's tools. */
 const DELEGATE = { type: 'object', properties: { member: { type: 'string' }, task: { type: 'string' } }, required: ['member'] };
+const VOTE = { type: 'object', properties: { choice: { type: 'integer' }, reason: { type: 'string' } }, required: ['choice', 'reason'] };
 const ROUTE = { type: 'object', properties: { route: { type: 'string' }, reason: { type: 'string' } }, required: ['route'] };
 /** Capacities that run on the members' tier (`groups.memberTier`) rather than the person's own model. */
 const MEMBER_CAPS = new Set(['propose', 'write_member', 'vote', 'ballot']);
 /** Structured outputs of the committee: a member's vote, the chair's decision. */
 const IDEA_BALLOT = { type: 'object', properties: { vote: { enum: DECISIONS }, reason: { type: 'string' } }, required: ['vote', 'reason'] };
 const IDEA_VERDICT = { type: 'object', properties: { decision: { enum: DECISIONS }, summary: { type: 'string' } }, required: ['decision', 'summary'] };
+
+/** A member's vote on the assembly's proposals, as recorded by vota_proposta: the number of the proposal and why. */
+export interface ProposalVote {
+  choice: number;
+  reason: string;
+}
 
 /** A joint plan as committed through commit_plan (the data of the writer's run). */
 export interface PlanData {
@@ -608,9 +615,16 @@ export class GroupManager {
           case 'vote': {
             const k = Math.max(0, (roster.voting ?? []).indexOf(m.id));
             const n = Math.max(1, Math.min(2, (roster.voting ?? []).length));
+            const ballot = this.stopTool<{ choice?: unknown; reason?: unknown }>('vota_proposta', t('rt.group.voteTool'), VOTE, (a) => {
+              const choice = Number(a.choice);
+              const proposals = run.proposals?.length ?? 0;
+              return Number.isInteger(choice) && choice >= 1 && (!proposals || choice <= proposals)
+                ? { content: t('rt.committee.ballot.recorded'), data: { choice, reason: String(a.reason ?? '').slice(0, max) } satisfies ProposalVote }
+                : { error: t('rt.group.voteTool') };
+            });
             return {
-              system: system(false), task: [t('rt.group.vote', { group: g.name, proposals: input, name: m.name, id: m.id }), t('rt.group.voteFormat')].join('\n'), tools: [],
-              mock: slow(() => ({ text: JSON.stringify({ choice: 1 + ((k + this.host.world().day) % n), reason: t('rt.mock.voteReason') }) })),
+              system: system(false), task: t('rt.group.vote', { group: g.name, proposals: input, name: m.name, id: m.id }), tools: [ballot],
+              mock: slow(() => ({ toolCalls: [{ name: 'vota_proposta', args: { choice: 1 + ((k + this.host.world().day) % n), reason: t('rt.mock.voteReason') } }] })),
             };
           }
         }
@@ -710,14 +724,17 @@ export class GroupManager {
       if (prior && prior.configHash !== configHash) {
         // Another membership or topology cannot replay the old run (its ballots were cast by other seats): it is let go.
         console.warn(`[committee ${g.name}] run ${prior.runId} was begun under another config: abandoned, a new run starts`);
+        await this.letGo(system, prior.runId, 'config changed');
       } else if (prior) {
         open(prior.runId);
         const again = await system.resume(prior.runId, { input: brief, ...(prior.wait ? { wait: prior.wait } : {}) }, { sessionId: prior.runId, signal });
         // A run the journal no longer holds, or one that used up its deferrals, starts anew; any other outcome stands.
         const lost = again.status === 'failed' && again.reason?.layer === 'execution';
         const spent = again.status === 'stopped' && again.reason?.code === 'limit';
-        if (lost || spent) console.warn(`[committee ${g.name}] run ${prior.runId} cannot go on (${again.reason?.code}${again.reason?.detail ? `: ${again.reason.detail}` : ''}): a new run starts`);
-        else {
+        if (lost || spent) {
+          console.warn(`[committee ${g.name}] run ${prior.runId} cannot go on (${again.reason?.code}${again.reason?.detail ? `: ${again.reason.detail}` : ''}): a new run starts`);
+          await this.letGo(system, prior.runId, lost ? 'run lost' : 'deferrals used up');
+        } else {
           runId = prior.runId;
           res = again;
         }
@@ -744,6 +761,17 @@ export class GroupManager {
       ...(out.unmet ? { unmet: out.unmet } : {}), ...(out.outOfPolicy ? { outOfPolicy: out.outOfPolicy } : {}),
       runId, configHash, waiting, ...(res.wait ? { wait: res.wait.token } : {}),
     };
+  }
+
+  /** Cancels a committee run the idea no longer uses, where the plexus version in use can (`System.cancel`); never fails. */
+  private async letGo(system: System, runId: string, reason: string): Promise<void> {
+    const cancel = (system as { cancel?: (id: string, o: { by: string; reason: string }) => Promise<unknown> }).cancel;
+    if (typeof cancel !== 'function') return;
+    try {
+      await cancel.call(system, runId, { by: 'hub', reason });
+    } catch (err) {
+      console.warn(`[committee] run ${runId} could not be cancelled: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   /** The idea comes back after a deferral: its waiting committee run goes on with the revised `brief` (see `reviewIdea`). */
