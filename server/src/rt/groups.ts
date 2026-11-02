@@ -763,12 +763,16 @@ export class GroupManager {
     };
   }
 
-  /** Cancels a committee run the idea no longer uses, where the plexus version in use can (`System.cancel`); never fails. */
+  /**
+   * Cancels a committee run the idea no longer uses, where the plexus version in use can (`System.cancel`); never fails.
+   * The run has no caller (the hub starts it), so the cancel names none either: the gate allows the run's owner only.
+   */
   private async letGo(system: System, runId: string, reason: string): Promise<void> {
-    const cancel = (system as { cancel?: (id: string, o: { by: string; reason: string }) => Promise<unknown> }).cancel;
+    const cancel = (system as { cancel?: (id: string, o: { reason: string }) => Promise<{ status: string; reason?: { code?: string; detail?: string } }> }).cancel;
     if (typeof cancel !== 'function') return;
     try {
-      await cancel.call(system, runId, { by: 'hub', reason });
+      const out = await cancel.call(system, runId, { reason });
+      if (out.status !== 'stopped') console.warn(`[committee] run ${runId} was not cancelled: ${out.status}${out.reason?.detail ? ` (${out.reason.detail})` : ''}`);
     } catch (err) {
       console.warn(`[committee] run ${runId} could not be cancelled: ${err instanceof Error ? err.message : err}`);
     }

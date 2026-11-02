@@ -146,11 +146,11 @@ test('a run the idea lets go (another config, a lost run) is cancelled first whe
   const first = ok(await manager.reviewIdea(g, 'brief', mock, members, undefined, { idea: 'idea-8' }));
   assert.equal(first.waiting, true);
 
-  const cancelled: Array<{ id: string; by: string; reason: string }> = [];
+  const cancelled: Array<{ id: string; reason: string }> = [];
   const real = hub.systemFor.bind(hub);
   hub.systemFor = async (...a) => {
     const system = await real(...a);
-    return { ...system, cancel: async (id: string, o: { by: string; reason: string }) => void cancelled.push({ id, ...o }) } as typeof system;
+    return { ...system, cancel: async (id: string, o: { reason: string }) => void cancelled.push({ id, ...o }) } as typeof system;
   };
   try {
     mock.next();
@@ -171,6 +171,33 @@ test('a run the idea lets go (another config, a lost run) is cancelled first whe
   } finally {
     hub.systemFor = real;
   }
+});
+
+test('with the real plexus System a waiting run the idea lets go is cancelled, and it cannot be resumed afterwards', async () => {
+  const { hub, manager } = boot();
+  const { g, members } = committee(manager);
+  const { mock } = scripted(['defer', 'approve']);
+  const first = ok(await manager.reviewIdea(g, 'brief', mock, members, undefined, { idea: 'idea-9' }));
+  assert.equal(first.waiting, true);
+
+  // Another membership: the manager lets the old run go through the real System.cancel.
+  mock.next();
+  const reseated = [members[1]!, members[0]!, members[2]!];
+  const second = ok(await manager.resumeReview(g, first, 'brief', mock, reseated, undefined, 'idea-9'));
+  assert.notEqual(second.runId, first.runId);
+
+  // The hub keeps one system per group: ask for the one of the first membership again, on the same journal.
+  const roster = { group: g.id, seats: members.map((m) => m.id), chair: members[0]!.id, maxRounds: (host.cfg.ideas.committee.maxDeferrals ?? 3) + 1 };
+  const system = await hub.systemFor(g, members, 'committee', roster);
+  assert.equal(typeof system.cancel, 'function', 'the plexus in use has System.cancel');
+
+  const again = await system.cancel(first.runId, { reason: 'check' });
+  assert.equal(again.status, 'stopped');
+  assert.equal(again.reason?.code, 'cancelled');
+  assert.equal(again.reason?.detail, 'config changed', 'the manager had already cancelled it, with its reason');
+  const refused = await system.resume(first.runId, { input: 'brief' });
+  assert.notEqual(refused.status, 'completed');
+  assert.notEqual(refused.status, 'waiting');
 });
 
 test('a run that used up its deferrals starts anew', async () => {
