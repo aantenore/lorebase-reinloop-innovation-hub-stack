@@ -12,7 +12,10 @@
 #   AGENT_PLEXUS_PACKAGES  same for agent-plexus     (default "core adapters")
 #   STACK_PIN_REF          git ref to build from a clean export of the checkout; empty (default): its working tree
 #   STACK_PIN_VENDOR       output folder           (default <repo>/vendor)
-# --no-install only refreshes the tarballs: package.json and node_modules stay as they are.
+# Same-version repacks: npm keeps the old integrity of a file: dependency, so `npm ci` would install stale cached code.
+# Hence the lock entries of the repacked packages are dropped (with their installed folders) before `npm install`
+# re-resolves them; with --no-install only their integrity in package-lock.json is rewritten from the new tarballs.
+# --no-install otherwise leaves package.json and node_modules as they are.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="${STACK_PIN_VENDOR:-$ROOT/vendor}"
@@ -73,6 +76,26 @@ pin() {
       fs.writeFileSync(pkgFile, JSON.stringify(j, null, 2) + "\n");
     ' "$ROOT/package.json" "$VENDOR" "$repo" "$scope" "$packages"
   fi
+  node -e '
+    const fs = require("fs"); const path = require("path"); const crypto = require("crypto");
+    const [root, vendor, repo, scope, packages, install] = process.argv.slice(1);
+    const lockFile = path.join(root, "package-lock.json");
+    if (!fs.existsSync(lockFile)) process.exit(0);
+    const lock = JSON.parse(fs.readFileSync(lockFile, "utf8"));
+    for (const p of packages.split(" ").filter(Boolean)) {
+      const key = `node_modules/${scope}/${p}`;
+      const entry = lock.packages && lock.packages[key];
+      if (!entry) continue;
+      if (install === "1") {
+        delete lock.packages[key];
+        fs.rmSync(path.join(root, key), { recursive: true, force: true });
+      } else if (typeof entry.resolved === "string" && entry.resolved.startsWith("file:")) {
+        const tgz = path.join(root, entry.resolved.slice(5));
+        if (fs.existsSync(tgz)) entry.integrity = "sha512-" + crypto.createHash("sha512").update(fs.readFileSync(tgz)).digest("base64");
+      }
+    }
+    fs.writeFileSync(lockFile, JSON.stringify(lock, null, 2) + "\n");
+  ' "$ROOT" "$VENDOR" "$repo" "$scope" "$packages" "$INSTALL"
   echo "[pin] $repo ($(git -C "$src" rev-parse --short "${REF:-HEAD}")${REF:+, clean export}): $(cd "$VENDOR/$repo" && ls *.tgz | tr '\n' ' ')"
 }
 
