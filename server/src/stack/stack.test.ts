@@ -41,7 +41,7 @@ test('stackFor composes the three tiers on the offline model, one agent per capa
   try {
     for (const tier of ['opus', 'sonnet', 'haiku'] as const) {
       const ps = await hub.stackFor(person(`p-${tier}`, tier));
-      assert.deepEqual(ps.stack.agents().sort(), [...CAPACITIES].sort());
+      assert.deepEqual(ps.stack.agents().sort(), [...CAPACITIES, 'decide_close'].sort());
       assert.equal(ps.stack.config.layers.model?.adapter, 'hub-mock');
       assert.equal(ps.stack.config.profile, tier);
       const tc = cfg.decisions.tiers[tier];
@@ -103,7 +103,8 @@ test('a mock decide run commits a plan through the scratch; the tap reports usag
     assert.equal(out.run.status, 'completed');
     assert.deepEqual(log, ['say:ciao', 'commit']);
     assert.deepEqual(out.plan, { summary: 'build', steps: [{ action: 'wait', label: 'w' }] });
-    assert.equal(usages.length, 2);
+    // commit_plan stops the run: no model turn after it
+    assert.equal(usages.length, 1);
     assert.equal(usages[0]!.agent, 'decide');
     assert.equal(usages[0]!.person.tier, 'sonnet');
     assert.ok(usages[0]!.usage.inputTokens > 0);
@@ -133,7 +134,8 @@ test('stream: events come while the run goes on, the result carries the plan; a 
     assert.ok(types.includes('tool.call') && types.at(-1) === 'run.end', types.join(','));
     const res = await s.result;
     assert.equal(res.run.runId, 'p2:decide:fixed');
-    assert.equal(res.run.output, 'ok');
+    // the run ended on commit_plan (stop): no answer turn after it
+    assert.equal(res.run.output, '');
     assert.equal(res.plan?.summary, 'r');
 
     const echo = await ps.run('reply', 'ciao Mara', { sessionId: 'p2:r1', tools: [] });
@@ -195,6 +197,6 @@ test('loadPersonConfig: profile model, own model, offline model, agent overlay a
   assert.equal(own.agents.reply!.model, 'default');
   const mock = await loadPersonConfig('sonnet', true, { dataDir, model: 'anthropic/claude-x', agents: (a) => ({ decide: { instructions: `${Object.keys(a).length} agents` } }) });
   assert.deepEqual(mock.layers.model, { adapter: 'hub-mock', options: { model: 'mock/anthropic/claude-x' } });
-  assert.equal(mock.agents.decide!.instructions, '11 agents');
+  assert.equal(mock.agents.decide!.instructions, '12 agents');
   await assert.rejects(loadPersonConfig('gold' as never, false, { dataDir }), /gold/);
 });

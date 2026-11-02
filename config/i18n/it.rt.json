@@ -409,7 +409,14 @@
       "revise": "Situazione:\n{{task}}\n\nPiano precedente:\n{{candidate}}\n\nRivedilo tenendo conto di questo: {{feedback}}"
     },
     "commitPlan": "Fissa il piano comune proposto: una lista di passi, ognuno con who (id del membro che lo fa).",
-    "planCaptured": "piano registrato"
+    "planCaptured": "piano registrato",
+    "delegateTool": "Chiedi a un membro del gruppo cosa propone di fare, poi decidi tu. Membri a cui puoi chiedere:",
+    "delegated": "hai chiesto a {name}; la sua risposta arriva dopo",
+    "noMember": "membro inesistente; scegline uno tra: {members}",
+    "routeTool": "Scegli il membro più adatto a decidere il piano comune.",
+    "routed": "decide {name}",
+    "verdictTool": "Dai il tuo giudizio sul piano proposto: pass è true solo se va bene così com'è; altrimenti feedback dice cosa cambiare, in italiano.",
+    "voteFormat": "Rispondi solo con JSON: {\"choice\": numero della proposta, \"reason\": \"perché, in una frase\"}."
   },
   "events": {
     "formed": "Nasce il gruppo {name} ({pattern}): {members}",

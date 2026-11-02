@@ -1,24 +1,33 @@
 // The agent stack of the hub: one agent-layers stack per person (model, tools, runtime, telemetry composed from
 // config/stacks/person.json), reached through `StackHub.stackFor(entity)`. A person acts in capacities (decide, reply,
 // propose, ...); each capacity is an agent of the person's stack.
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { assemble, mergeConfig, resolveConfig, type System } from '@agent-plexus/core';
 import {
   compose, type CallContext, type Message, type RunEvent, type RunInput, type RunResult, type Stack,
 } from '@agent-layers/core';
 import type { Tool } from 'reinloop';
 import type { Ballot, ChairDecision } from '../rt/committee.ts';
 import { decisionTier, faculties, ideaTools, tierConfig, type DecideHost } from '../rt/decide.ts';
-import type { PlanData } from '../rt/groups.ts';
+import type { Group, PlanData } from '../rt/groups.ts';
+import { ROOT } from '../config.ts';
 import type { RtEntity } from '../rt/world.ts';
-import { gameAgents, loadPersonConfig } from './configs.ts';
+import { DATA_DIR_ENV, gameAgents, loadPersonConfig } from './configs.ts';
 import { feedTelemetry, type PersonRef, type StackFeed } from './feed.ts';
 import { MockScripts, modelAdapters, Transcripts, type MockScript } from './model.ts';
+import { GroupRuns, hubLoader } from './members.ts';
 import { CAPTURE, Scratch, ScratchEntry, toolAdapters, worldToolDefs } from './tools.ts';
+import { topologyFor, type Roster, type SystemKind } from './topologies.ts';
 
 export { StackFeed, feedTelemetry, type PersonRef, type ReasoningEvent, type TelemetryEvent, type UsageEvent } from './feed.ts';
 export { loadPersonConfig } from './configs.ts';
+export { GroupRuns, type Briefing, type BriefCall, type GroupRun } from './members.ts';
+export { topologyFor, type Roster, type SystemKind } from './topologies.ts';
 
 /** What a person can do in a stack; each one is an agent of `config/stacks/person.json`. */
-export type Capacity = 'decide' | 'reply' | 'propose' | 'write' | 'write_member' | 'vote' | 'ballot' | 'chair' | 'judge' | 'route' | 'lead';
+export type Capacity = 'decide' | 'decide_close' | 'reply' | 'propose' | 'write' | 'write_member' | 'vote' | 'ballot' | 'chair' | 'judge' | 'route' | 'lead';
 
 export interface RunOpts {
   /** Session of the run: with the capacity it keys the run's scratch (tool instances, captured results). */
@@ -66,6 +75,35 @@ export interface StackHubOptions {
   catalog?: (e: RtEntity) => Tool[];
   /** Config file of the person stack (default: `STACK_PERSON_CONFIG` or `config/stacks/person.json`). */
   configFile?: string;
+  /** Base config of the group systems (default: `STACK_PLEXUS_CONFIG` or `config/plexus/base.json`). */
+  systemsFile?: string;
+}
+
+/** Default location of the base config of the group systems. */
+export const PLEXUS_CONFIG = 'config/plexus/base.json';
+
+/** A system whose in-flight runs finish before it is closed. */
+function guarded(system: System): { system: System; retire(): Promise<void> } {
+  let active = 0;
+  let retired = false;
+  let closing: Promise<void> | undefined;
+  const close = () => (closing ??= system.close());
+  const track = async <T>(go: () => Promise<T>): Promise<T> => {
+    active++;
+    try {
+      return await go();
+    } finally {
+      active--;
+      if (retired && !active) void close().catch(() => undefined);
+    }
+  };
+  return {
+    system: { ...system, run: (input, ctx) => track(() => system.run(input, ctx)), resume: (id, reply, ctx) => track(() => system.resume(id, reply, ctx)), close },
+    async retire() {
+      retired = true;
+      if (!active) await close();
+    },
+  };
 }
 
 const MAX_RUN_ID = 128;
@@ -190,6 +228,11 @@ export class StackHub {
   readonly #catalog: (e: RtEntity) => Tool[];
   readonly #configFile: string | undefined;
   readonly #stacks = new Map<string, Promise<PersonStack>>();
+  readonly #systemsFile: string | undefined;
+  readonly #systems = new Map<string, { hash: string; held: Promise<ReturnType<typeof guarded>> }>();
+  #base: Promise<{ raw: Record<string, unknown>; file: string }> | undefined;
+  /** The group decisions in flight, by session id: the members of the group systems read their briefings here. */
+  readonly runs = new GroupRuns();
 
   constructor(host: DecideHost, o: StackHubOptions) {
     this.host = host;
@@ -197,6 +240,7 @@ export class StackHub {
     this.mock = o.mock;
     this.dataDir = o.dataDir;
     this.#configFile = o.configFile;
+    this.#systemsFile = o.systemsFile;
     this.#catalog = o.catalog ?? ((e) => {
       const tc = tierConfig(e, host.cfg);
       return [...faculties(host, e, { maxConsults: 0, ...(tc.maxWebCalls === undefined ? {} : { maxWebCalls: tc.maxWebCalls }) }), ...ideaTools(host, e)];
@@ -236,7 +280,41 @@ export class StackHub {
     return new Person(person, stack, scratch, scripts, transcripts);
   }
 
+  /**
+   * The system of a group's pattern over the roster of the moment. Kept per group while the membership (kind, people,
+   * topology) stays the same; a change builds a new one and closes the old one once its runs end.
+   */
+  async systemFor(g: Pick<Group, 'id'>, members: readonly RtEntity[], kind: SystemKind, roster: Roster): Promise<System> {
+    const def = topologyFor(kind, roster);
+    const hash = createHash('sha256').update(JSON.stringify([kind, members.map((m) => m.id), def])).digest('hex').slice(0, 16);
+    const have = this.#systems.get(g.id);
+    if (have?.hash === hash) return (await have.held).system;
+    if (have) void have.held.then((h) => h.retire(), () => undefined);
+    const held = this.#assemble(g, kind, def);
+    this.#systems.set(g.id, { hash, held });
+    held.catch(() => {
+      if (this.#systems.get(g.id)?.held === held) this.#systems.delete(g.id);
+    });
+    return (await held).system;
+  }
+
+  async #assemble(g: Pick<Group, 'id'>, kind: SystemKind, def: ReturnType<typeof topologyFor>): Promise<ReturnType<typeof guarded>> {
+    this.#base ??= (async () => {
+      const file = resolve(ROOT, this.#systemsFile ?? process.env.STACK_PLEXUS_CONFIG ?? PLEXUS_CONFIG);
+      return { raw: JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>, file };
+    })();
+    const { raw, file } = await this.#base;
+    const env = { ...process.env, [DATA_DIR_ENV]: this.dataDir };
+    const limits = def.limits ? mergeConfig(raw.limits, { system: def.limits }) : raw.limits;
+    const config = resolveConfig({ ...raw, system: { name: `${g.id}-${kind}` }, members: def.members, topology: def.topology, ...(limits ? { limits } : {}) }, { cwd: dirname(file), file, env });
+    const system = await assemble(config, { resolveAdapter: hubLoader({ stackFor: (e) => this.stackFor(e), runs: this.runs }), quiet: true, env });
+    return guarded(system);
+  }
+
   async close(): Promise<void> {
+    const systems = [...this.#systems.values()];
+    this.#systems.clear();
+    await Promise.allSettled(systems.map(async (s) => (await s.held).retire()));
     const all = await Promise.allSettled([...this.#stacks.values()]);
     this.#stacks.clear();
     await Promise.allSettled(all.map((r) => (r.status === 'fulfilled' ? r.value.stack.close() : undefined)));

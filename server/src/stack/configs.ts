@@ -46,7 +46,8 @@ const paramsOf = (cfg: GameConfig, kind: string): CallParams => (cfg.decisions.m
 
 /**
  * Per-agent settings the game owns, for the agents of a person's config:
- * - `decide` and `reply` budgets and output limits from the tier and the conversation settings;
+ * - `decide`, `decide_close` (the closing run of a decision) and `reply` budgets and output limits from the tier, the
+ *   closing turn and the conversation settings;
  * - model params of every agent from its `hub.params` ({ kind: plan|reply|prose, group }): thinking, effort, prompt cache;
  * - the model of the agents marked `hub.model: "member"` from `groups.memberTier`.
  * Group capacities keep the budgets of the config file; the group systems tune them from the group size.
@@ -72,6 +73,9 @@ export function gameAgents(
     if (a.ext?.['hub.model'] === 'member' && cfg.groups.memberTier) change.model = sim.modelOverride ?? sim.models[cfg.groups.memberTier];
     if (name === 'decide') {
       ext['reinloop.budget'] = { maxTurns: tc.maxTurns, maxToolCalls: tc.maxConsults + tc.maxTurns * 4 };
+      change.settings = { maxOutputTokens: tc.maxOutputTokens };
+    } else if (name === 'decide_close') {
+      ext['reinloop.budget'] = { maxTurns: cfg.decisions.closingTurn?.maxTurns ?? 1 };
       change.settings = { maxOutputTokens: tc.maxOutputTokens };
     } else if (name === 'reply') {
       const consults = Math.max(0, cfg.conversation.replyMaxConsults);

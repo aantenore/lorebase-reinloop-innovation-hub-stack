@@ -29,6 +29,12 @@
       "settings": { "maxOutputTokens": 5000 },
       "ext": { "hub.params": { "kind": "plan" }, "reinloop.budget": { "maxTurns": 6, "maxToolCalls": 30 } }
     },
+    "decide_close": {
+      "model": "default",
+      "tools": ["world__*", "lorebase__*"],
+      "settings": { "maxOutputTokens": 5000 },
+      "ext": { "hub.params": { "kind": "plan" }, "reinloop.budget": { "maxTurns": 1 } }
+    },
     "reply": {
       "model": "default",
       "tools": ["world__rethink", "lorebase__*"],

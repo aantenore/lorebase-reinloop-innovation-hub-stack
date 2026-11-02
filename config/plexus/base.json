@@ -3,7 +3,7 @@
   "members": {},
   "ports": {
     "topology": { "adapter": "basic-topology" },
-    "execution": { "adapter": "sqlite-execution", "options": { "path": "../../data/plexus/journal.db", "maxRuns": 2000 } },
+    "execution": { "adapter": "sqlite-execution", "options": { "path": "${env:HUB_DATA_DIR:-../../data}/plexus/journal.db", "maxRuns": 2000 } },
     "attribution": { "adapter": "rule-attribution" }
   },
   "topology": { "kind": "sequence", "steps": [] },
