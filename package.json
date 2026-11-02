@@ -25,10 +25,15 @@
     "reinloop:pin": "bash scripts/reinloop-pin.sh",
     "world:reset": "node scripts/world-reset.ts",
     "lorebase:archive-to-tags": "node scripts/archive-to-tags.ts",
-    "idea:validate": "node scripts/validate-idea.ts"
+    "idea:validate": "node scripts/validate-idea.ts",
+    "stack:pin": "bash scripts/stack-pin.sh"
   },
   "dependencies": {
-    "reinloop": "file:vendor/reinloop-474f0b5c.tgz",
+    "@agent-layers/adapters": "file:vendor/agent-layers/agent-layers-adapters-0.4.0.tgz",
+    "@agent-layers/core": "file:vendor/agent-layers/agent-layers-core-0.4.0.tgz",
+    "@agent-plexus/adapters": "file:vendor/agent-plexus/agent-plexus-adapters-0.2.0.tgz",
+    "@agent-plexus/core": "file:vendor/agent-plexus/agent-plexus-core-0.2.0.tgz",
+    "reinloop": "^0.3.0",
     "ws": "^8.22.0"
   }
 }
