@@ -17,21 +17,21 @@
 // voters) on `groups.memberTier`, and at most `groups.maxProposers` of them are consulted.
 // The members of a system are stack/members.ts; this file writes their briefings (`groupRun`) and keeps the trace.
 import {
-  agent, type EasyAgent, type MockTurn, type ModelRequest, type RunResult, type Tool, tool,
+  type MockTurn, type ModelRequest, type RunResult, type Tool, tool,
 } from 'reinloop';
+import type { SystemResult } from '@agent-plexus/core';
 import type { Translate } from '../i18n.ts';
 import type { GameConfig, GroupPattern } from './config.ts';
-import { AGENT_PATTERNS, cacheParams } from './config.ts';
-import { type DecideHost, decisionTier, decisionTimeoutMs, type Failure, faculties, ideaTools, limitsOf, modelRef, normalizeSteps, planSchema, stackHub } from './decide.ts';
-import type { CommitteeDecision, CommitteeVote } from './ideas.ts';
-import { type Ballot, type BallotError, type BallotLabels, ballotSchema, type ChairDecision, chairSchema, checkBallot, checkChair, type Criterion, DECISIONS } from './committee.ts';
+import { AGENT_PATTERNS } from './config.ts';
+import { type DecideHost, decisionTier, decisionTimeoutMs, type Failure, faculties, ideaTools, limitsOf, normalizeSteps, planSchema, stackHub } from './decide.ts';
+import type { CommitteeDecision, CommitteeRunRef, CommitteeVote } from './ideas.ts';
+import { type BallotError, type BallotLabels, ballotSchema, chairSchema, checkBallot, checkChair, checkFreeBallot, checkFreeChair, type Criterion, DECISIONS, unionOf } from './committee.ts';
 import type { Tier } from '../world/types.ts';
 import { flatSteps, hasHabit, mockGroupPlan, mockSteps } from './mock.ts';
 import type { PlanStep } from './plan.ts';
 import { inboxBlock, look, memberLine, timeLine } from './prompt.ts';
-import { weightedWinner } from './society.ts';
 import type { RtEntity } from './world.ts';
-import { blocksOf, type Briefing, type GroupRun } from '../stack/members.ts';
+import { blocksOf, committeeData, type Briefing, type CommitteeRun, type GroupRun } from '../stack/members.ts';
 import { memberId, type Roster } from '../stack/topologies.ts';
 
 export type TraceRole = 'proposer' | 'critic' | 'router' | 'leader' | 'voter';
@@ -74,6 +74,19 @@ export interface CommitteeOutcome {
   outOfPolicy?: string[];
 }
 
+/** A committee run's outcome: the run's id and config hash for a later resubmission, and whether it waits for one (a deferral). */
+export interface CommitteeReview extends CommitteeOutcome, CommitteeRunRef {
+  waiting: boolean;
+}
+
+/** What the briefings of a committee session need beyond the group run. */
+interface CommitteeSession {
+  run: CommitteeRun;
+  brief: string;
+  criteria: Criterion[];
+  mock: CommitteeMock;
+}
+
 /** The committee's policy for one session: the criteria it votes on (empty: free votes). */
 export interface CommitteePolicy {
   criteria: Criterion[];
@@ -107,11 +120,10 @@ const VERDICT = { type: 'object', properties: { pass: { type: 'boolean' }, feedb
 const DELEGATE = { type: 'object', properties: { member: { type: 'string' }, task: { type: 'string' } }, required: ['member'] };
 const ROUTE = { type: 'object', properties: { route: { type: 'string' }, reason: { type: 'string' } }, required: ['route'] };
 /** Capacities that run on the members' tier (`groups.memberTier`) rather than the person's own model. */
-const MEMBER_CAPS = new Set(['propose', 'write_member', 'vote']);
+const MEMBER_CAPS = new Set(['propose', 'write_member', 'vote', 'ballot']);
 /** Structured outputs of the committee: a member's vote, the chair's decision. */
 const IDEA_BALLOT = { type: 'object', properties: { vote: { enum: DECISIONS }, reason: { type: 'string' } }, required: ['vote', 'reason'] };
 const IDEA_VERDICT = { type: 'object', properties: { decision: { enum: DECISIONS }, summary: { type: 'string' } }, required: ['decision', 'summary'] };
-const asDecision = (v: unknown): CommitteeDecision | undefined => (DECISIONS.includes(v as CommitteeDecision) ? (v as CommitteeDecision) : undefined);
 
 /** A joint plan as committed through commit_plan (the data of the writer's run). */
 export interface PlanData {
@@ -187,8 +199,6 @@ export class GroupManager {
   /** Run ids are unique across restarts (the journal keeps the runs of the last process too). */
   private readonly boot = Date.now().toString(36);
   private runSeq = 0;
-  /** Model of each member run (by run name) of the decision being built, for cost booking. */
-  private readonly models = new Map<string, string>();
   private readonly host: DecideHost;
   private readonly events: GroupEvents;
 
@@ -337,11 +347,6 @@ export class GroupManager {
     return deciding || !cheap ? own : cheap;
   }
 
-  private modelFor(m: RtEntity, deciding: boolean): string {
-    const tier = this.tierFor(m, deciding);
-    return tier === decisionTier(m, this.cfg) ? m.model : (this.host.sim.modelOverride ?? this.host.sim.models[tier]);
-  }
-
   /**
    * Members consulted besides the one deciding: at most `groups.maxProposers`, the most esteemed
    * first (rule esteem_vote_weight; ties keep the group's order).
@@ -357,43 +362,6 @@ export class GroupManager {
       if (!Array.isArray(args?.steps) || !args.steps.length) return { content: this.t('rt.act.noSteps'), isError: true };
       const summary = String(args.reason ?? '');
       return { content: summary || this.t('rt.group.planCaptured'), stop: true, data: { summary, steps: args.steps } satisfies PlanData };
-    });
-  }
-
-  /**
-   * One member acting in one capacity: its model (own when `deciding`, else `groups.memberTier`), identity,
-   * tools and (when offline) a scripted mock. Plan writers (`json`) get commit_plan and its format; judges,
-   * voters and routers (`structured`) get no tools; prose proposers get their faculties and the prose format.
-   */
-  private member(
-    m: RtEntity, g: Group, role: TraceRole,
-    opts: {
-      json?: boolean; structured?: boolean; deciding?: boolean; output?: Record<string, unknown>; extra?: string; description?: string;
-      mock: (req: ModelRequest, i: number) => MockTurn; turns?: number; members?: RtEntity[];
-      /** These tools only (a ballot): no faculties, no format, `turns` turns. */
-      only?: Tool[];
-    },
-  ): EasyAgent {
-    const deciding = opts.deciding === true;
-    const tier = this.tierFor(m, deciding);
-    const model = this.modelFor(m, deciding);
-    const counts = this.counts([m], tier);
-    const tc = this.cfg.decisions.tiers[tier];
-    const name = `${m.id}${SEP}${role}`;
-    this.models.set(name, model);
-    const bare = opts.structured === true || !!opts.only;
-    const tools = opts.only ?? (bare ? [] : [...(opts.json ? [this.planTool(counts.max)] : []), ...faculties(this.host, m, tc), ...ideaTools(this.host, m)]);
-    const format = bare ? '' : opts.json ? this.formatText(opts.members ?? [m], tier) : this.t('rt.group.proposeFormat');
-    const p = this.cfg.decisions.modelParams;
-    return agent({
-      name,
-      description: opts.description,
-      model: modelRef(this.host, model, this.mockWithConsult(g, m, opts.json === true, opts.mock), this.cfg.mock.thinkDelayMs),
-      params: { ...(opts.json ? p.plan : p.prose), ...cacheParams(this.cfg, true), maxTokens: opts.json ? counts.maxTokens : this.cfg.groups.proseMaxOutputTokens },
-      ...(opts.output ? { output: opts.output } : {}),
-      instructions: [this.instructionsOf(m, g, !bare), opts.extra, format].filter(Boolean).join('\n'),
-      tools,
-      budget: { maxTurns: (opts.turns ?? this.cfg.groups.maxTurns) + (bare ? 0 : tc.maxConsults) + (opts.json ? 1 : 0) },
     });
   }
 
@@ -463,9 +431,10 @@ export class GroupManager {
 
   /**
    * One group decision as its system's members see it: the briefing of each seat (role template, task, tools, offline
-   * script), the trace of what was said, and the checks of the assembly's ballot box.
+   * script), the trace of what was said, and the checks of the assembly's ballot box. A committee session adds the ballot and
+   * the chair's briefings.
    */
-  private groupRun(g: Group, members: RtEntity[], roster: Roster, situation: string, trace: TraceEntry[]): GroupRun {
+  private groupRun(g: Group, members: RtEntity[], roster: Roster, situation: string, trace: TraceEntry[], committee?: CommitteeSession): GroupRun {
     const t = this.t;
     const tpl = (k: string) => t(`rt.group.tpl.${k}`);
     const fill = (text: string, vars: Record<string, string>) => text.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => vars[k] ?? '');
@@ -489,7 +458,8 @@ export class GroupManager {
         const m = byId.get(id);
         return m?.alive ? m : undefined;
       },
-      voting: roster.voting ?? [],
+      voting: roster.voting ?? roster.seats ?? [],
+      ...(committee ? { committee: committee.run } : {}),
       said: (personId, role, text) => {
         const said = this.traceText(text, members).slice(0, max);
         trace.push({ member: personId, role, text: said });
@@ -586,6 +556,55 @@ export class GroupManager {
               mock: slow(() => ({ toolCalls: [{ name: 'instrada', args: { route: pick().id, reason: t('rt.mock.routeReason', { name: pick().name }) } }] })),
             };
           }
+          case 'ballot': {
+            const cm = committee!;
+            const { criteria } = cm;
+            const free = criteria.length === 0;
+            const limits = { maxChars: max, demandsMax: this.cfg.ideas.committee.demandsMax ?? 4 };
+            const labels = this.ballotLabels();
+            const vote = this.stopTool<Record<string, unknown>>(
+              'vota_idea', t(free ? 'rt.committee.ballot.toolFree' : 'rt.committee.ballot.tool'), free ? IDEA_BALLOT : ballotSchema(criteria, labels),
+              (a) => this.recorded(free ? checkFreeBallot(a, limits) : checkBallot(a, criteria, limits), criteria),
+            );
+            const mockBallot = () => {
+              const v = cm.mock.vote(m);
+              if (free) return v;
+              const first = criteria[0]?.key;
+              return { criteri: Object.fromEntries(criteria.map((c) => [c.key, { soddisfatto: v.vote === 'approve' || c.key !== first, nota: v.reason }])), voto: v.vote, motivo: v.reason };
+            };
+            return {
+              system: system(false), task: t(free ? 'rt.committee.voteTask' : 'rt.committee.voteTaskCriteria', { brief: input, name: m.name, id: m.id, group: g.name }), tools: [vote],
+              mock: slow(() => ({ toolCalls: [{ name: 'vota_idea', args: mockBallot() }] })),
+            };
+          }
+          case 'chair': {
+            const cm = committee!;
+            const { criteria } = cm;
+            const free = criteria.length === 0;
+            const votes = committeeData(input).votes;
+            const none = t('rt.committee.none');
+            const named = (v: CommitteeVote) => v.name ?? nameOf(v.member);
+            const lines = votes.length
+              ? votes.map((v) => (free
+                ? t('rt.committee.voteLine', { name: named(v), vote: t(`rt.committee.vote.${v.vote}`), reason: v.reason })
+                : t('rt.committee.voteLineCriteria', { name: named(v), vote: t(`rt.committee.vote.${v.vote}`), reason: v.reason, unmet: v.unmet?.join(', ') || none, extra: v.outOfPolicy?.join('; ') || none }))).join('\n')
+              : t('rt.committee.noVotes');
+            const limits = { maxChars: this.cfg.decisions.textMaxChars, demandsMax: this.cfg.ideas.committee.demandsMax ?? 4 };
+            const decide = this.stopTool<Record<string, unknown>>(
+              'decide_idea', t(free ? 'rt.committee.ballot.chairToolFree' : 'rt.committee.ballot.chairTool'), free ? IDEA_VERDICT : chairSchema(criteria, this.ballotLabels()),
+              (a) => this.recorded(free ? checkFreeChair(a, limits) : checkChair(a, criteria, limits), criteria),
+            );
+            const mockChair = () => {
+              const c = cm.mock.chair(votes);
+              if (free) return c;
+              const unmet = c.decision === 'approve' ? [] : unionOf(votes.map((v) => v.unmet));
+              return { decisione: c.decision, criteri_non_soddisfatti: unmet.length || c.decision === 'approve' ? unmet : criteria.slice(0, 1).map((x) => x.key), sintesi: c.summary };
+            };
+            return {
+              system: system(false), task: t(free ? 'rt.committee.chairTask' : 'rt.committee.chairTaskCriteria', { brief: cm.brief, votes: lines, name: m.name, id: m.id, group: g.name }), tools: [decide],
+              mock: slow(() => ({ toolCalls: [{ name: 'decide_idea', args: mockChair() }] })),
+            };
+          }
           case 'vote': {
             const k = Math.max(0, (roster.voting ?? []).indexOf(m.id));
             const n = Math.max(1, Math.min(2, (roster.voting ?? []).length));
@@ -634,124 +653,102 @@ export class GroupManager {
     return t('rt.committee.ballot.badVote');
   }
 
-  /** A tool whose valid call ends the run with its data; an invalid one says why (the run may try again). */
-  private recordTool<T>(name: string, description: string, schema: Record<string, unknown>, check: (args: Record<string, unknown>) => T | BallotError, criteria: Criterion[]): Tool {
-    return tool<Record<string, unknown>>(name, description, schema, (args) => {
-      const out = check(args ?? {});
-      if (out && typeof out === 'object' && 'error' in out) return { content: this.ballotError(out as BallotError, criteria), isError: true };
-      return { content: this.t('rt.committee.ballot.recorded'), stop: true, data: out };
-    });
+  /** What a record tool answers: the recorded data, or why the policy refuses it (the run may try again). */
+  private recorded<T>(out: T | BallotError, criteria: Criterion[]): { data: unknown; content: string } | { error: string } {
+    if (out && typeof out === 'object' && 'error' in out) return { error: this.ballotError(out as BallotError, criteria) };
+    return { content: this.t('rt.committee.ballot.recorded'), data: out };
   }
 
   /**
    * The committee decides on one submitted idea (`brief`: the idea, its reviews, the company's facts and the committee's
-   * policy). Every seated member votes, up to `ideas.committee.maxVoters` (0: all), on the members' tier; in an assembly
-   * the esteem-weighted plurality decides, otherwise the chair (the leader, own model) decides after reading the votes.
-   * With policy criteria (`policy.criteria`), ballots and the chair's decision are tool calls checked against them
-   * (committee.ts); without, they are structured outputs.
+   * policy), as a committee system: every seat votes (up to `ideas.committee.maxVoters`, 0: all, on the members' tier; the
+   * rest abstain), then in an assembly the esteem-weighted plurality decides, otherwise the chair (own model) does.
+   * With policy criteria (`policy.criteria`), ballots and the chair's decision are record-tool calls checked against them
+   * (committee.ts); without, they record the vote and the reason only.
+   * A deferral ends the run `waiting` (`waiting: true`): the caller applies it and keeps `{runId, configHash, wait}` with the
+   * idea; `resumeReview` continues that run when the idea comes back. `idea`: the idea's code, the handle of the wait.
    * `seated`: who sits in this session, chair first (the host leaves out members with a conflict of interest);
    * default every living member, the leader first.
    */
-  async reviewIdea(g: Group, brief: string, mock: CommitteeMock, seated?: RtEntity[], policy?: CommitteePolicy): Promise<CommitteeOutcome | Failure> {
+  async reviewIdea(
+    g: Group, brief: string, mock: CommitteeMock, seated?: RtEntity[], policy?: CommitteePolicy, o: { idea?: string; prior?: CommitteeRunRef } = {},
+  ): Promise<CommitteeReview | Failure> {
     const members = seated ?? this.livingMembers(g);
     if (!members.length) return { error: 'no living members' };
     const t = this.t;
-    const signal = AbortSignal.timeout(decisionTimeoutMs(this.cfg, this.host.world()));
-    const sinks = this.host.runSinks();
+    const hub = stackHub(this.host);
+    const w = this.host.world();
     const cc = this.cfg.ideas.committee;
-    const voting = this.consulted(members, cc.maxVoters ?? 0);
     const criteria = policy?.criteria ?? [];
-    const withCriteria = criteria.length > 0;
     const max = this.cfg.groups.traceMaxChars;
-    const limits = { maxChars: max, demandsMax: cc.demandsMax ?? 4 };
-    const labels = this.ballotLabels();
-    let costUsd = 0;
-    const run = async (who: RtEntity, a: EasyAgent, task: string, role: TraceRole) => {
-      const res = await a.run(task, { sinks, signal });
-      costUsd += res.costUsd ?? 0;
-      const model = this.models.get(a.name) ?? who.model;
-      this.host.ranModel({ id: model === who.model ? `${g.id}/${who.id}` : `${g.id}/${who.id}:${model}`, name: `${g.name}/${who.name}`, model, tier: `group:${g.pattern}` }, res);
-      return { res, role };
-    };
-    const mockBallot = (m: RtEntity) => {
-      const v = mock.vote(m);
-      const first = criteria[0]?.key;
-      return { criteri: Object.fromEntries(criteria.map((c) => [c.key, { soddisfatto: v.vote === 'approve' || c.key !== first, nota: v.reason }])), voto: v.vote, motivo: v.reason };
-    };
-    const ballots = await Promise.all(voting.map((m) => {
-      const voter = withCriteria
-        ? this.member(m, g, 'voter', {
-          only: [this.recordTool('vota_idea', t('rt.committee.ballot.tool'), ballotSchema(criteria, labels), (a) => checkBallot(a, criteria, limits), criteria)],
-          turns: cc.ballotMaxTurns ?? 3,
-          mock: () => ({ toolCalls: [{ name: 'vota_idea', args: mockBallot(m) }] }),
-        })
-        : this.member(m, g, 'voter', { structured: true, output: IDEA_BALLOT, mock: () => ({ text: JSON.stringify(mock.vote(m)) }) });
-      return run(m, voter, t(withCriteria ? 'rt.committee.voteTaskCriteria' : 'rt.committee.voteTask', { brief, name: m.name, id: m.id, group: g.name }), 'voter');
-    }));
-    const votes: CommitteeVote[] = [];
-    ballots.forEach(({ res }, k) => {
-      const m = voting[k]!;
-      const ok = res.status === 'completed' || res.status === 'stopped';
-      if (withCriteria) {
-        const b = ok ? (res.data as Ballot | undefined) : undefined;
-        if (!b?.vote) return;
-        votes.push({ member: m.id, name: m.name, vote: b.vote, reason: b.reason, criteria: b.criteria, unmet: b.unmet, outOfPolicy: b.outOfPolicy });
-        this.host.deliberated(g, m.id, 'voter', `${b.vote}: ${b.reason}`.slice(0, max));
-        return;
-      }
-      const d = res.status === 'completed' ? (res.data as { vote?: unknown; reason?: unknown } | undefined) : undefined;
-      const vote = asDecision(d?.vote);
-      if (!vote) return;
-      const reason = String(d?.reason ?? '').slice(0, max);
-      votes.push({ member: m.id, name: m.name, vote, reason });
-      this.host.deliberated(g, m.id, 'voter', `${vote}: ${reason}`);
-    });
-    const named = (v: CommitteeVote) => v.name ?? members.find((m) => m.id === v.member)?.name ?? v.member;
-    const union = (xs: Array<string[] | undefined>) => [...new Set(xs.flatMap((x) => x ?? []))];
-    if (g.pattern === 'assembly') {
-      if (!votes.length) return { error: 'no valid vote' };
-      const weighted = weightedWinner(votes.map((v) => DECISIONS.indexOf(v.vote)), votes.map((v) => this.host.voteWeight(v.member)), DECISIONS.length);
-      const decision = DECISIONS[weighted.winner] ?? 'defer';
-      const side = votes.filter((v) => v.vote === decision);
-      const summary = side.map((v) => `${named(v)}: ${v.reason}`).join(' ').slice(0, this.cfg.decisions.textMaxChars);
-      console.log(`[committee ${g.name}] assembly: ${decision} (${votes.length} vote(s)), estimated cost $${costUsd.toFixed(4)}`);
-      return { decision, summary, votes, ...(withCriteria ? { unmet: decision === 'approve' ? [] : union(side.map((v) => v.unmet)), outOfPolicy: union(votes.map((v) => v.outOfPolicy)) } : {}) };
-    }
     const chair = members[0]!;
-    const none = t('rt.committee.none');
-    const lines = votes.length
-      ? votes.map((v) => (withCriteria
-        ? t('rt.committee.voteLineCriteria', { name: named(v), vote: t(`rt.committee.vote.${v.vote}`), reason: v.reason, unmet: v.unmet?.join(', ') || none, extra: v.outOfPolicy?.join('; ') || none })
-        : t('rt.committee.voteLine', { name: named(v), vote: t(`rt.committee.vote.${v.vote}`), reason: v.reason }))).join('\n')
-      : t('rt.committee.noVotes');
-    const task = t(withCriteria ? 'rt.committee.chairTaskCriteria' : 'rt.committee.chairTask', { brief, votes: lines, name: chair.name, id: chair.id, group: g.name });
-    if (withCriteria) {
-      const mockChair = () => {
-        const c = mock.chair(votes);
-        const unmet = c.decision === 'approve' ? [] : union(votes.map((v) => v.unmet));
-        return { decisione: c.decision, criteri_non_soddisfatti: unmet.length || c.decision === 'approve' ? unmet : criteria.slice(0, 1).map((x) => x.key), sintesi: c.summary };
-      };
-      const judge = this.member(chair, g, 'leader', {
-        deciding: true, turns: cc.ballotMaxTurns ?? 3,
-        only: [this.recordTool('decidi_idea', t('rt.committee.ballot.chairTool'), chairSchema(criteria, labels), (a) => checkChair(a, criteria, { ...limits, maxChars: this.cfg.decisions.textMaxChars }), criteria)],
-        mock: () => ({ toolCalls: [{ name: 'decidi_idea', args: mockChair() }] }),
-      });
-      const { res } = await run(chair, judge, task, 'leader');
-      const d = res.status === 'completed' || res.status === 'stopped' ? (res.data as ChairDecision | undefined) : undefined;
-      if (!d?.decision) return { error: `chair ${chair.name}: ${res.status}${res.reason ? ` (${res.reason})` : ''}` };
-      this.host.deliberated(g, chair.id, 'leader', `${d.decision}: ${d.summary}`.slice(0, max));
-      console.log(`[committee ${g.name}] ${g.pattern}: ${d.decision} (${votes.length} vote(s)), estimated cost $${costUsd.toFixed(4)}`);
-      return { decision: d.decision, summary: d.summary, votes, unmet: d.unmet, outOfPolicy: union([d.outOfPolicy, ...votes.map((v) => v.outOfPolicy)]) };
+    // Seats are the group's own members (plus alternates): they stay the same from one idea to the next, so a run can be replayed.
+    const people = [...new Map([...this.livingMembers(g), ...members].map((m) => [m.id, m])).values()];
+    const roster: Roster = { group: g.id, seats: people.map((m) => m.id), chair: chair.id, maxRounds: (cc.maxDeferrals ?? 3) + 1 };
+    const configHash = hub.configHash(people, 'committee', roster);
+    const trace: TraceEntry[] = [];
+    const run = this.groupRun(g, people, roster, brief, trace, {
+      brief, criteria, mock,
+      run: {
+        idea: o.idea ?? g.id,
+        voters: this.consulted(members, cc.maxVoters ?? 0).map((m) => m.id),
+        assembly: g.pattern === 'assembly',
+        criteria: criteria.length > 0,
+        textMax: this.cfg.decisions.textMaxChars,
+        name: (id) => people.find((m) => m.id === id)?.name ?? id,
+      },
+    });
+    const signal = AbortSignal.timeout(decisionTimeoutMs(this.cfg, w));
+    const fresh = () => `${g.id}:${w.day}:${w.minute}:${this.boot}${(this.runSeq++).toString(36)}`;
+    const closers: Array<() => void> = [];
+    const open = (id: string) => void closers.push(hub.runs.open(id, run));
+    let runId = fresh();
+    let res: SystemResult | undefined;
+    try {
+      const system = await hub.systemFor(g, people, 'committee', roster);
+      const prior = o.prior;
+      if (prior && prior.configHash !== configHash) {
+        // Another membership or topology cannot replay the old run (its ballots were cast by other seats): it is let go.
+        console.warn(`[committee ${g.name}] run ${prior.runId} was begun under another config: abandoned, a new run starts`);
+      } else if (prior) {
+        open(prior.runId);
+        const again = await system.resume(prior.runId, { input: brief, ...(prior.wait ? { wait: prior.wait } : {}) }, { sessionId: prior.runId, signal });
+        // A run the journal no longer holds, or one that used up its deferrals, starts anew; any other outcome stands.
+        const lost = again.status === 'failed' && again.reason?.layer === 'execution';
+        const spent = again.status === 'stopped' && again.reason?.code === 'limit';
+        if (lost || spent) console.warn(`[committee ${g.name}] run ${prior.runId} cannot go on (${again.reason?.code}${again.reason?.detail ? `: ${again.reason.detail}` : ''}): a new run starts`);
+        else {
+          runId = prior.runId;
+          res = again;
+        }
+      }
+      if (!res) {
+        open(runId);
+        res = await system.run(brief, { runId, sessionId: runId, signal });
+      }
+    } catch (err) {
+      return { error: `committee: ${err instanceof Error ? err.message : String(err)}` };
+    } finally {
+      for (const close of closers) close();
     }
-    const judge = this.member(chair, g, 'leader', { structured: true, deciding: true, output: IDEA_VERDICT, mock: () => ({ text: JSON.stringify(mock.chair(votes)) }) });
-    const { res } = await run(chair, judge, task, 'leader');
-    const d = res.status === 'completed' ? (res.data as { decision?: unknown; summary?: unknown } | undefined) : undefined;
-    const decision = asDecision(d?.decision);
-    if (!decision) return { error: `chair ${chair.name}: ${res.status}${res.reason ? ` (${res.reason})` : ''}` };
-    const summary = String(d?.summary ?? '').slice(0, this.cfg.decisions.textMaxChars);
-    this.host.deliberated(g, chair.id, 'leader', `${decision}: ${summary}`.slice(0, max));
-    console.log(`[committee ${g.name}] ${g.pattern}: ${decision} (${votes.length} vote(s)), estimated cost $${costUsd.toFixed(4)}`);
-    return { decision, summary, votes };
+    const problems = res.record.filter((h) => h.status !== 'completed' && h.status !== 'waiting').map((h) => `${h.member}: ${h.status}${h.reason ? ` (${h.reason.code})` : ''}`);
+    if (res.status !== 'completed' && res.status !== 'waiting') {
+      return { error: `committee ${res.status}: ${[res.reason ? `${res.reason.code}${res.reason.by ? ` by ${res.reason.by}` : ''}` : '', ...problems].filter(Boolean).slice(0, 4).join('; ')}` };
+    }
+    const out = committeeData(res.output);
+    if (!out.decision) return { error: `committee ${res.status}: no decision` };
+    const waiting = res.status === 'waiting';
+    console.log(`[committee ${g.name}] ${g.pattern}: ${out.decision} (${out.votes.length} vote(s))${waiting ? `, waits for a resubmission as ${runId}` : ''}`);
+    return {
+      decision: out.decision, summary: (out.summary ?? '').slice(0, this.cfg.decisions.textMaxChars), votes: out.votes,
+      ...(out.unmet ? { unmet: out.unmet } : {}), ...(out.outOfPolicy ? { outOfPolicy: out.outOfPolicy } : {}),
+      runId, configHash, waiting, ...(res.wait ? { wait: res.wait.token } : {}),
+    };
+  }
+
+  /** The idea comes back after a deferral: its waiting committee run goes on with the revised `brief` (see `reviewIdea`). */
+  resumeReview(g: Group, prior: CommitteeRunRef, brief: string, mock: CommitteeMock, seated?: RtEntity[], policy?: CommitteePolicy, idea?: string): Promise<CommitteeReview | Failure> {
+    return this.reviewIdea(g, brief, mock, seated, policy, { prior, ...(idea ? { idea } : {}) });
   }
 
   /** Runs the group's pattern and returns the joint plan with the trace of how it was decided (or why there is none). */

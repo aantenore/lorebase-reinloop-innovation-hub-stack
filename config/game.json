@@ -702,7 +702,8 @@
         "pilot",
         "scale"
       ],
-      "demandsMax": 4
+      "demandsMax": 4,
+      "maxDeferrals": 3
     },
     "sourcesMax": 8,
     "sourceTitleMaxChars": 120,

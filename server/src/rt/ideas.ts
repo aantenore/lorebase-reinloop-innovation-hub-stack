@@ -54,6 +54,15 @@ export interface CommitteeVote {
   outOfPolicy?: string[];
 }
 
+/** The committee run that deferred an idea and waits for its resubmission (the journal keeps the ballots already cast). */
+export interface CommitteeRunRef {
+  runId: string;
+  /** Hash of the committee system's config when the run began: another one cannot replay the run. */
+  configHash: string;
+  /** The wait the resubmission answers. */
+  wait?: string;
+}
+
 export interface Idea {
   code: string;
   title: string;
@@ -82,6 +91,8 @@ export interface Idea {
   sources: IdeaSource[];
   /** Evidence behind it (Evidence Records on its branch), oldest first. */
   evidence: Evidence[];
+  /** In memory only: the committee run waiting on this idea's resubmission after a deferral. */
+  committeeRun?: CommitteeRunRef | null;
   /**
    * The committee's last word on it (`recused`: members who abstained for a conflict of interest, names; `unmet`: the
    * policy criteria the decision names as unmet; `outOfPolicy`: demands recorded outside the policy criteria; `phase`:
@@ -140,6 +151,8 @@ export interface IdeasConfig {
     phases: string[];
     /** Demands outside the policy kept per ballot. */
     demandsMax: number;
+    /** Deferrals one committee run keeps waiting for (the next one starts a new run). */
+    maxDeferrals: number;
   };
   /**
    * Policy keys (Lorebase `Rule` records, value >= 1 means on): `conflictOfInterest` keeps the champion and the
@@ -376,6 +389,12 @@ export class IdeaBook {
   /** Game clock at which a pitch was submitted (0 when it predates this run), undefined when it is not waiting. */
   submittedClock(code: string): number | undefined {
     return this.submittedAt.get(code);
+  }
+
+  /** Keeps (or, with null, forgets) the committee run that waits on an idea's resubmission. */
+  setCommitteeRun(code: string, run: CommitteeRunRef | null): void {
+    const i = this.get(code);
+    if (i) i.committeeRun = run;
   }
 
   /** Ideas waiting for the committee, oldest submission first. */

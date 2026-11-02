@@ -48,6 +48,7 @@ const paramsOf = (cfg: GameConfig, kind: string): CallParams => (cfg.decisions.m
  * Per-agent settings the game owns, for the agents of a person's config:
  * - `decide`, `decide_close` (the closing run of a decision) and `reply` budgets and output limits from the tier, the
  *   closing turn and the conversation settings;
+ * - `ballot` and `chair` (the committee) turns from `ideas.committee.ballotMaxTurns`;
  * - model params of every agent from its `hub.params` ({ kind: plan|reply|prose, group }): thinking, effort, prompt cache;
  * - the model of the agents marked `hub.model: "member"` from `groups.memberTier`.
  * Group capacities keep the budgets of the config file; the group systems tune them from the group size.
@@ -82,6 +83,9 @@ export function gameAgents(
       // Consultations, plus rethink and one refused extra call, then the answer.
       ext['reinloop.budget'] = { maxTurns: cfg.conversation.replyMaxTurns, maxToolCalls: consults + 2 };
       change.settings = { maxOutputTokens: cfg.conversation.replyMaxOutputTokens };
+    } else if (name === 'ballot' || name === 'chair') {
+      // A ballot or decision the policy refuses can be recorded again.
+      ext['reinloop.budget'] = { maxTurns: cfg.ideas.committee.ballotMaxTurns ?? 3 };
     }
     out[name] = change;
   }

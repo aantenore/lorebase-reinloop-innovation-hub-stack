@@ -64,7 +64,7 @@
     "ballot": {
       "model": "default",
       "tools": ["world__*"],
-      "ext": { "hub.params": { "kind": "prose", "group": true }, "reinloop.budget": { "maxTurns": 2 } }
+      "ext": { "hub.params": { "kind": "prose", "group": true }, "hub.model": "member", "reinloop.budget": { "maxTurns": 2 } }
     },
     "chair": {
       "model": "default",

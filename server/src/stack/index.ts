@@ -23,7 +23,7 @@ import { topologyFor, type Roster, type SystemKind } from './topologies.ts';
 
 export { StackFeed, feedTelemetry, type PersonRef, type ReasoningEvent, type TelemetryEvent, type UsageEvent } from './feed.ts';
 export { loadPersonConfig } from './configs.ts';
-export { GroupRuns, type Briefing, type BriefCall, type GroupRun } from './members.ts';
+export { committeeData, GroupRuns, type Briefing, type BriefCall, type CommitteeOutcomeData, type CommitteeRun, type GroupRun } from './members.ts';
 export { topologyFor, type Roster, type SystemKind } from './topologies.ts';
 
 /** What a person can do in a stack; each one is an agent of `config/stacks/person.json`. */
@@ -107,6 +107,10 @@ function guarded(system: System): { system: System; retire(): Promise<void> } {
 }
 
 const MAX_RUN_ID = 128;
+
+/** What identifies a group system: its kind, the people in it and its topology. */
+const systemHash = (kind: SystemKind, members: readonly RtEntity[], def: ReturnType<typeof topologyFor>): string =>
+  createHash('sha256').update(JSON.stringify([kind, members.map((m) => m.id), def])).digest('hex').slice(0, 16);
 
 class Person implements PersonStack {
   readonly person: PersonRef;
@@ -286,7 +290,7 @@ export class StackHub {
    */
   async systemFor(g: Pick<Group, 'id'>, members: readonly RtEntity[], kind: SystemKind, roster: Roster): Promise<System> {
     const def = topologyFor(kind, roster);
-    const hash = createHash('sha256').update(JSON.stringify([kind, members.map((m) => m.id), def])).digest('hex').slice(0, 16);
+    const hash = systemHash(kind, members, def);
     const have = this.#systems.get(g.id);
     if (have?.hash === hash) return (await have.held).system;
     if (have) void have.held.then((h) => h.retire(), () => undefined);
@@ -296,6 +300,11 @@ export class StackHub {
       if (this.#systems.get(g.id)?.held === held) this.#systems.delete(g.id);
     });
     return (await held).system;
+  }
+
+  /** Hash of the config `systemFor` would give this membership: a run journaled under another one cannot be replayed. */
+  configHash(members: readonly RtEntity[], kind: SystemKind, roster: Roster): string {
+    return systemHash(kind, members, topologyFor(kind, roster));
   }
 
   async #assemble(g: Pick<Group, 'id'>, kind: SystemKind, def: ReturnType<typeof topologyFor>): Promise<ReturnType<typeof guarded>> {

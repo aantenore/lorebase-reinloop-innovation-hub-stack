@@ -11,7 +11,8 @@ export type Brief =
   | 'worker' | 'prose' | 'scout' | 'planner' // prose: tolerant (partial text counts, no answer is empty text)
   | 'lead' | 'merge' | 'plan' | 'doer' // plan writers: the run must commit a plan
   | 'proposal' // plan writer who may fail without failing the parallel node it sits in
-  | 'judge' | 'route' | 'vote';
+  | 'judge' | 'route' | 'vote'
+  | 'ballot' | 'chair'; // committee: a member's ballot, the chair's decision (record tools)
 
 /** Options of a `hub-person` member. */
 export interface PersonSpec {
@@ -47,7 +48,10 @@ export interface Roster {
   mentor?: string;
   /** Assembly: everyone who proposes and votes, in the order of the ballots. */
   voting?: string[];
-  /** Rounds of a council or a mentor (at least 1). */
+  /** Committee: everyone who has a seat (a member unseated for the idea abstains without a model call), and the chair. */
+  seats?: string[];
+  chair?: string;
+  /** Rounds of a council or a mentor, ballots of a committee run: one plus its deferrals (at least 1). */
   maxRounds: number;
 }
 
@@ -95,7 +99,10 @@ const rounds = (n: number): number => Math.max(1, Math.floor(Number.isFinite(n) 
  * - router: handoff { start lead-route, candidates-write_member } (the router names one: `plexus.handoff`);
  * - chain: sequence [ scout-propose, planners-propose, doer-write ];
  * - mentor: loop { sequence [ apprentice-write, mentor-judge ] } until the mentor passes;
- * - assembly: graph { proposals: parallel { voting-write_member, merge ballot-box }, ballots: parallel { voting-vote, merge tally } }.
+ * - assembly: graph { proposals: parallel { voting-write_member, merge ballot-box }, ballots: parallel { voting-vote, merge tally } };
+ * - committee: graph { ballots: parallel { seats-ballot, merge committee-tally }, chair: chair-chair, revision: revision }. The tally ends
+ *   an assembly's vote or hands over to the chair (`hub.chair`); a deferral (`hub.decision`) goes to the revision, which waits for the
+ *   idea's resubmission and sends the revised brief back to the ballots. Ballots (and so deferrals) are capped by `maxRounds`.
  */
 export function topologyFor(kind: SystemKind, roster: Roster): TopologyDef {
   switch (kind) {
@@ -186,7 +193,37 @@ export function topologyFor(kind: SystemKind, roster: Roster): TopologyDef {
         },
       };
     }
-    case 'committee':
-      throw new RangeError('committee topology: built with the committee review');
+    case 'committee': {
+      const seats = need(roster.seats, 'seats', kind);
+      const chair = need(roster.chair, 'a chair', kind);
+      const ballots = rounds(roster.maxRounds);
+      const deferred = { ext: { 'hub.decision': 'defer' } };
+      return {
+        members: Object.fromEntries([
+          ...seats.map((p) => person(p, 'ballot', 'voter', 'ballot')),
+          person(chair, 'chair', 'leader', 'chair'),
+          ['committee-tally', fn('committee-tally')],
+          ['revision', { adapter: 'hub-revision' } satisfies AdapterRef],
+        ]),
+        topology: {
+          kind: 'graph',
+          start: 'ballots',
+          nodes: {
+            ballots: { kind: 'parallel', branches: ids(seats, 'ballot'), merge: 'committee-tally' },
+            chair: memberId(chair, 'chair'),
+            revision: 'revision',
+          },
+          edges: [
+            { from: 'ballots', to: 'revision', when: deferred },
+            { from: 'ballots', to: 'chair', when: { ext: { 'hub.chair': 'yes' } } },
+            { from: 'chair', to: 'revision', when: deferred },
+            { from: 'revision', to: 'ballots' },
+          ],
+          end: ['ballots', 'chair'],
+        },
+        // Every pass over the ballots calls each seat, the tally, and the chair or the revision (earlier passes replay but count).
+        limits: { maxIterations: ballots, maxSteps: ballots * (seats.length + 3) },
+      };
+    }
   }
 }

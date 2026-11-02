@@ -253,7 +253,7 @@ Seeded from `lorebase/rules.seed.yaml` (Kind `Rule`). The ones about ideas and t
 | `slot_scadono_a_fine_trimestre` | 1 | unused approval slots are lost at the end of the quarter (0: they carry over); perception and the committee brief say how many are left and on which day and hour they expire |
 | `min_idea_reviewers` | 2 | reviews by non-authors needed to submit |
 | `committee_quorum` | 2 | committee members present for it to decide; every seated member votes (`ideas.committee.maxVoters`, 0 = all) |
-| `criteri_comitato` | 1 | the committee votes on the criteria of the rules `criterio_comitato_*` with value 1: a ballot (`vota_idea`) gives a verdict per criterion, a kill or defer names an unmet one, demands outside the criteria are recorded as out of policy; the chair records the decision with `decidi_idea` (0: free votes) |
+| `criteri_comitato` | 1 | the committee votes on the criteria of the rules `criterio_comitato_*` with value 1: a ballot (`vota_idea`) gives a verdict per criterion, a kill or defer names an unmet one, demands outside the criteria are recorded as out of policy; the chair records the decision with `decide_idea` (0: free votes) |
 | `criterio_comitato_prove_del_problema`, `_concorrenza`, `_fattibilita`, `_rischio`, `_coerenza_strategica` | 1 each | the criteria (their text is what the members read; set one to 0 to drop it, add a rule with the prefix to add one) |
 | `fase_approvazione` | 1 | what an approval funds: 1 concept exploration (paying customers belong to the pilot stage, outside the committee's scope), 2 pilot, 3 scale (`ideas.committee.phases`) |
 | `costo_del_rinvio` | 1 | approval slots of the quarter a deferral consumes when the idea meets the candidacy requirements (0: none) |

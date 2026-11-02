@@ -175,3 +175,24 @@ test('evidence: written on the idea branch, one per URL, a validation per person
   assert.ok(calls.some((c) => c.startsWith('import_records Evidence @idea/')));
   assert.ok(events.includes('evidence:1'));
 });
+
+test('a deferred idea keeps the committee run that waits for its resubmission, in memory only', async () => {
+  const { client } = fakeClient();
+  const book = new IdeaBook(client, 'main', cfg, 's1', { changed: () => undefined });
+  const idea = await book.create('Livia', { title: 'Rinvio', ...full }, { at, quarter: 'Q1', signals: [], maxOpen: 3 });
+  assert.ok(typeof idea !== 'string');
+  book.review(idea.code, 'Dario', { impact: 8, feasibility: 6, novelty: 7, fit: 8, risk: 3 }, 'bene', at);
+  book.review(idea.code, 'Sara', { impact: 6, feasibility: 6, novelty: 5, fit: 7, risk: 4 }, 'ok', at);
+  await book.submit(idea.code, 'Livia', { at, clock: 0, minReviewers: 2 });
+  const run = { runId: 'g1:1:0:abc', configHash: 'f00dfeed', wait: 'call#0' };
+  book.setCommitteeRun(idea.code, run);
+  const out = book.decide(idea.code, 'defer', 'dati', [], at, 'Dario');
+  assert.ok(typeof out !== 'string' && out.stage === 'proposal');
+  assert.deepEqual(book.get(idea.code)!.committeeRun, run);
+  // Only the idea's own record is written: the run is the server's, and a restart does not bring it back.
+  assert.ok(!JSON.stringify(ideaRow(out, 's1')).includes('g1:1:0:abc'));
+  assert.equal(ideaFromRecord({ key: idea.code, values: JSON.parse(JSON.stringify(ideaRow(out, 's1'))) }).committeeRun, undefined);
+  book.setCommitteeRun(idea.code, null);
+  assert.equal(book.get(idea.code)!.committeeRun, null);
+  book.setCommitteeRun('unknown', run);
+});

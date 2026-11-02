@@ -1713,7 +1713,9 @@ export class Game {
   /** An idea as clients see it: its state plus where it stands against the candidacy requirements. */
   private ideaDto(i: Idea): Idea & { gate?: GateStatus & { need: { minReal: number; minSources: number; minHuman: number; minScore: number } } } {
     const g = this.gateOf(i);
-    return g && this.evidence ? { ...i, gate: { ...g, need: this.evidence.requirements() } } : i;
+    // The committee run waiting on the idea is the server's own.
+    const { committeeRun: _run, ...idea } = i;
+    return g && this.evidence ? { ...idea, gate: { ...g, need: this.evidence.requirements() } } : idea;
   }
 
   /** The missing requirements as a factual sentence. */
@@ -2021,11 +2023,17 @@ export class Game {
           this.stats.alternates += alternates.length;
           console.log(`[committee ${g.name}] ${idea.code}: alternates ${alternates.map((m) => m.name).join(', ')} (below quorum)`);
         }
-        const out = await this.groups.reviewIdea(g, brief, this.committeeMock(idea), seated, { criteria: policy.criteria } satisfies CommitteePolicy);
+        // A deferred idea that comes back goes on with the run that deferred it (its ballots are kept); otherwise a new run begins.
+        const mock = this.committeeMock(idea);
+        const review = { criteria: policy.criteria } satisfies CommitteePolicy;
+        const out = idea.committeeRun
+          ? await this.groups.resumeReview(g, idea.committeeRun, brief, mock, seated, review, idea.code)
+          : await this.groups.reviewIdea(g, brief, mock, seated, review, { idea: idea.code });
         if ('error' in out) {
           console.warn(`[committee ${g.name}] ${idea.code}: ${out.error}`);
           return;
         }
+        this.ideas.setCommitteeRun(idea.code, out.waiting ? { runId: out.runId, configHash: out.configHash, ...(out.wait ? { wait: out.wait } : {}) } : null);
         let { decision, summary } = out;
         const blocked = decision === 'approve' && (this.slotsLeft() <= 0 ? 'noSlots' : w.isFreeze() && w.r('freeze_blocks_approvals') >= 1 ? 'freeze' : undefined);
         if (blocked) {

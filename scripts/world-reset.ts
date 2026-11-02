@@ -11,10 +11,12 @@
 //   - stale branches (playbook/, policy/, breakthrough/, idea/, seed/, reset/, probe/) and their open
 //     Proposals are closed.
 // Then the private memory database of mnemo (config/mnemo.json db.path, MNEMO_DB) is deleted
-// (the downloaded embedding model in data/models is kept). Stop the game and mnemo first.
+// (the downloaded embedding model in data/models is kept), and so is the journal of the group systems
+// (config/plexus/base.json, ports.execution.options.path): its waiting committee runs belong to the old ideas.
+// Stop the game and mnemo first.
 //   node scripts/world-reset.ts [--dry-run] [--keep-memory] [--force]
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseYaml } from 'reinloop';
 import { loadConfig, ROOT } from '../server/src/config.ts';
@@ -119,6 +121,11 @@ if (batches.length) console.log(`  ${lb.bulkDeleteOperation}: ${batches.map((b) 
 console.log(`  close ${open.length} open Proposal(s) and delete ${stale.length} stale branch(es)${stale.length ? `: ${stale.map((b) => b.name).join(', ')}` : ''}`);
 const mnemoDb = resolve(ROOT, process.env.MNEMO_DB || (JSON.parse(readFileSync(resolve(ROOT, process.env.MNEMO_CONFIG ?? 'config/mnemo.json'), 'utf8')) as { db: { path: string } }).db.path);
 console.log(`  private memory: ${keepMemory ? 'kept' : `delete ${mnemoDb} (models kept)`}`);
+// The journal path of the group systems: base.json's `${env:HUB_DATA_DIR:-<default>}/...`, relative to config/plexus.
+const plexusFile = resolve(ROOT, process.env.STACK_PLEXUS_CONFIG ?? 'config/plexus/base.json');
+const journal = resolve(dirname(plexusFile), String((JSON.parse(readFileSync(plexusFile, 'utf8')) as { ports: { execution: { options: { path: string } } } }).ports.execution.options.path)
+  .replace(/\$\{env:(\w+)(?::-([^}]*))?\}/g, (_m, name: string, dflt?: string) => process.env[name] ?? dflt ?? ''));
+console.log(`  group journal: delete ${journal}`);
 if (dry) process.exit(0);
 
 // ---- apply ----------------------------------------------------------------------
@@ -150,6 +157,9 @@ if (changes) {
 // The hidden catalog is rebuilt from main (and anything missing is seeded back).
 const seeded = spawnSync(process.execPath, [resolve(ROOT, 'scripts/lorebase-seed.ts')], { stdio: 'inherit', env: process.env });
 if (seeded.status !== 0) console.warn('seed step failed: run npm run lorebase:seed');
+
+for (const f of [journal, `${journal}-wal`, `${journal}-shm`]) if (existsSync(f)) rmSync(f);
+console.log(`group journal deleted (${journal})`);
 
 if (!keepMemory) {
   for (const f of [mnemoDb, `${mnemoDb}-wal`, `${mnemoDb}-shm`]) if (existsSync(f)) rmSync(f);

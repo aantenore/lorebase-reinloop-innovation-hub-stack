@@ -4,7 +4,8 @@
 // tool calls checked here: every criterion gets a verdict, a vote that does not approve names an unmet criterion,
 // demands outside the criteria are recorded as such. Pure: nothing here decides.
 import type { Rule } from '../lorebase/rules.ts';
-import type { CommitteeDecision } from './ideas.ts';
+import type { CommitteeDecision, CommitteeVote } from './ideas.ts';
+import { weightedWinner } from './society.ts';
 
 export const DECISIONS: CommitteeDecision[] = ['approve', 'kill', 'defer'];
 
@@ -148,6 +149,18 @@ export function checkChair(args: Record<string, unknown>, criteria: Criterion[],
   return { decision, summary: text(args.sintesi ?? args.summary, o.maxChars), unmet, outOfPolicy: demandsFrom(args.richieste_fuori_policy, o.demandsMax, o.maxChars) };
 }
 
+/** A member's ballot when the policy sets no criteria: the vote and the reason (no verdicts, nothing unmet). Pure. */
+export function checkFreeBallot(args: Record<string, unknown>, o: { maxChars: number }): Ballot | BallotError {
+  const vote = asDecision(args.vote ?? args.voto);
+  return vote ? { vote, reason: text(args.reason ?? args.motivo, o.maxChars), criteria: {}, unmet: [], outOfPolicy: [] } : { error: 'vote' };
+}
+
+/** The chair's decision when the policy sets no criteria: the decision and the summary. Pure. */
+export function checkFreeChair(args: Record<string, unknown>, o: { maxChars: number }): ChairDecision | BallotError {
+  const decision = asDecision(args.decision ?? args.decisione);
+  return decision ? { decision, summary: text(args.summary ?? args.sintesi, o.maxChars), unmet: [], outOfPolicy: [] } : { error: 'vote' };
+}
+
 /** Ballots per criterion: how many judged it met and unmet. Pure. */
 export function criteriaTally(ballots: Array<Pick<Ballot, 'criteria'>>): Record<string, { met: number; unmet: number }> {
   const out: Record<string, { met: number; unmet: number }> = {};
@@ -165,4 +178,22 @@ export function criteriaTally(ballots: Array<Pick<Ballot, 'criteria'>>): Record<
 export function approvalPhase(value: number | undefined, phases: string[]): string {
   const i = Math.round(Number(value)) - 1;
   return phases[i >= 0 && i < phases.length ? i : 0] ?? '';
+}
+
+/** The distinct entries of several optional lists, in order. Pure. */
+export const unionOf = (lists: Array<string[] | undefined>): string[] => [...new Set(lists.flatMap((x) => x ?? []))];
+
+/**
+ * The decision of an assembly: the plurality of the votes weighed by the voters' esteem (`weight`); a tie keeps the first
+ * of approve, kill, defer. The summary joins the reasons of the winning side (cut at `textMax`); with criteria, `unmet`
+ * is what that side judged unmet (none for an approval) and `outOfPolicy` what everyone asked for outside the policy. Pure.
+ */
+export function assemblyOutcome(
+  votes: CommitteeVote[], weight: (member: string) => number, o: { name: (v: CommitteeVote) => string; textMax: number; criteria: boolean },
+): { decision: CommitteeDecision; summary: string; unmet?: string[]; outOfPolicy?: string[] } {
+  const weighted = weightedWinner(votes.map((v) => DECISIONS.indexOf(v.vote)), votes.map((v) => weight(v.member)), DECISIONS.length);
+  const decision = DECISIONS[weighted.winner] ?? 'defer';
+  const side = votes.filter((v) => v.vote === decision);
+  const summary = side.map((v) => `${o.name(v)}: ${v.reason}`).join(' ').slice(0, o.textMax);
+  return { decision, summary, ...(o.criteria ? { unmet: decision === 'approve' ? [] : unionOf(side.map((v) => v.unmet)), outOfPolicy: unionOf(votes.map((v) => v.outOfPolicy)) } : {}) };
 }
