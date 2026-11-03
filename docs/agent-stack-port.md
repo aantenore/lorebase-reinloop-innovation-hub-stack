@@ -3,10 +3,9 @@
 Target: the realtime game path (server/src/game-main.ts + server/src/rt/*); server/src/sim/ is legacy and stays untouched. Paths below are relative to the repository root.
 
 ## Dependencies
-- agent-layers 0.4.0 (`@agent-layers/core`, `@agent-layers/adapters`) and agent-plexus 0.2.0 (`@agent-plexus/core`, `@agent-plexus/adapters`) are not on npm yet. They are vendored as tarballs in `vendor/agent-layers` and `vendor/agent-plexus` and referenced with `file:` dependencies.
-- `npm run stack:pin` (scripts/stack-pin.sh) rebuilds and refreshes those tarballs from the sibling checkouts (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF` builds a committed ref instead of the working tree) and rewrites package.json.
-- Once the packages are published, replace the `file:` entries with `^0.4.0` (agent-layers) and `^0.2.0` (agent-plexus), delete `vendor/agent-layers`, `vendor/agent-plexus` and the pin script.
-- reinloop comes from npm (`^0.3.0`), the version the agent-layers reinloop adapter takes as its optional peer: one copy for the hub and the adapter.
+- Published on npm and used through registry ranges: `@agent-layers/core` and `@agent-layers/adapters` `^0.4.1`, `@agent-plexus/core` and `@agent-plexus/adapters` `^0.2.0`, `reinloop` `^0.3.1`.
+- `npm run stack:pin` (scripts/stack-pin.sh) is the way to test unreleased sibling checkouts: it temporarily re-vendors them (builds and packs tarballs into `vendor/` from `AGENT_LAYERS_DIR` / `AGENT_PLEXUS_DIR`; `STACK_PIN_REF` builds a committed ref instead of the working tree) and rewrites package.json with `file:` entries. Do not commit that state; restore with `git checkout package.json package-lock.json`, remove `vendor/` and `npm install`.
+- reinloop is the version the agent-layers reinloop adapter takes as its optional peer: one copy for the hub and the adapter.
 
 ## Decisions
 - Model now: hub-local ModelPort `hub-anthropic` registered via compose(config,{adapters}), wrapping reinloop's `anthropic/<model>` provider (keeps prompt caching, thinking/effort, workspace header, cache-token usage). openai-compatible against the Anthropic compat endpoint = fallback profile only. Native agent-layers anthropic adapter later (lift from hub-anthropic).

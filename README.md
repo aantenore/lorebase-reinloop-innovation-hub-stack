@@ -145,9 +145,11 @@ What the stacks report (usage with cache counts and price, reasoning, finished r
 `StackFeed` to the usage ledger of the Observatory, the thoughts shown to privileged clients, the mnemo run store and a
 privileged `{type:'stack'}` WebSocket message (span totals of `agent.*` and `plexus.*`).
 
-- `npm run stack:pin` rebuilds the vendored agent-layers / agent-plexus tarballs from the sibling checkouts
-  (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF=HEAD` builds the committed state) and rewrites `package.json`.
-  When the packages are on npm, replace the `file:` entries with ranges and drop `vendor/` and the script.
+- The stack packages come from npm (`@agent-layers/*` ^0.4.1, `@agent-plexus/*` ^0.2.0). To test unreleased sibling
+  checkouts, `npm run stack:pin` temporarily re-vendors them: it builds and packs the tarballs into `vendor/`
+  (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF=HEAD` builds the committed state) and points `package.json`
+  at them with `file:` entries. Do not commit that state: `git checkout package.json package-lock.json && rm -rf vendor`
+  and `npm install` return to the registry ranges.
 - Mock vs live: without `ANTHROPIC_API_KEY` (or with `--mock`) every stack runs on the offline `hub-mock` model, which
   calls the same scripted decisions as before and still goes through the whole stack (tools, plexus, feed). Live uses
   `hub-anthropic`. Files go to `stack.dataDir` (`config/game.json`, default `data/`; `HUB_DATA_DIR` replaces it).
@@ -156,8 +158,7 @@ privileged `{type:'stack'}` WebSocket message (span totals of `agent.*` and `ple
 ## Quickstart
 
 Requirements: Node >= 22.18, Docker, the `lorebase` checkout next to this one (Keeper and Herald are built
-from it). reinloop comes from npm; agent-layers and agent-plexus (not published yet) are vendored as tarballs in
-`vendor/` (see Agent stack).
+from it). reinloop, agent-layers and agent-plexus come from npm (see Agent stack for testing unreleased checkouts).
 
 ```bash
 npm install

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Refresh the vendored agent-layers and agent-plexus packages: build them from their repositories, pack the tarballs
-# into vendor/agent-layers and vendor/agent-plexus, point package.json at them and reinstall.
-# Temporary: once the packages are on npm, replace the file: dependencies with ranges (^0.4.0 and ^0.2.0) and drop
-# vendor/agent-layers, vendor/agent-plexus and this script.
+# Test unreleased agent-layers / agent-plexus checkouts in the hub: build them from their repositories, pack the
+# tarballs into vendor/agent-layers and vendor/agent-plexus, point package.json at them (file:) and reinstall.
+# The hub normally uses the published registry ranges; this re-vendors temporarily and its result must not be
+# committed. Go back with: git checkout package.json package-lock.json && rm -rf vendor && npm install
 #
 # Usage: npm run stack:pin -- [--no-install] [agent-layers|agent-plexus ...]   (default: both)
 # Environment (all optional):

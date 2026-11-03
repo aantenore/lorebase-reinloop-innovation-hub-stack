@@ -29,11 +29,11 @@
     "stack:pin": "bash scripts/stack-pin.sh"
   },
   "dependencies": {
-    "@agent-layers/adapters": "file:vendor/agent-layers/agent-layers-adapters-0.4.0.tgz",
-    "@agent-layers/core": "file:vendor/agent-layers/agent-layers-core-0.4.0.tgz",
-    "@agent-plexus/adapters": "file:vendor/agent-plexus/agent-plexus-adapters-0.2.0.tgz",
-    "@agent-plexus/core": "file:vendor/agent-plexus/agent-plexus-core-0.2.0.tgz",
-    "reinloop": "^0.3.0",
+    "@agent-layers/adapters": "^0.4.1",
+    "@agent-layers/core": "^0.4.1",
+    "@agent-plexus/adapters": "^0.2.0",
+    "@agent-plexus/core": "^0.2.0",
+    "reinloop": "^0.3.1",
     "ws": "^8.22.0"
   }
 }
