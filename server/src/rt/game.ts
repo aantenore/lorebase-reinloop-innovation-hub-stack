@@ -41,7 +41,8 @@ import { ResearchDesk, type ResearchEvent, type ResearchSource } from './researc
 import { committeeScore, type Evidence, EvidenceDesk, evidenceScore, evidenceWeight, gateStatus, type GateStatus, PERSONAS, VERDICTS } from './evidence.ts';
 import { signalBackend } from './signals.ts';
 import { approvalPhase, type Criterion, criteriaFrom, criteriaTally } from './committee.ts';
-import { modelRef } from './decide.ts';
+import { dataDirOf, modelRef, personCatalog } from './decide.ts';
+import { type PersonRef, SpanTally, StackFeed, StackHub } from '../stack/index.ts';
 
 type Msg = Record<string, unknown> & { type: string };
 /** One search or fetch as kept for the inspector and GET /api/research. */
@@ -77,6 +78,11 @@ export class Game {
   private discovered = new Map<string, import('./economy.ts').Discovery>();
   private readonly flows = new Flows();
   readonly usage = new UsageLedger();
+  /** The agent stacks of the world's people and what they report (usage, reasoning, telemetry). */
+  readonly stacks: StackHub;
+  private readonly stackSpans = new SpanTally();
+  /** Model of each stack run that called one (the run's end books under it). */
+  private readonly stackRunModels = new Map<string, string>();
   /** Recent thoughts (plan reasons) and Lorebase consultations per agent, for god mode. */
   private readonly thoughts = new Map<string, Array<{ at: { day: number; minute: number }; text: string; lang?: string }>>();
   private readonly consults = new Map<string, Array<{ at: { day: number; minute: number }; tool: string; query: string }>>();
@@ -207,11 +213,16 @@ export class Game {
     this.observatoryView = new Observatory({
       client: this.client, mnemo: this.mnemo, branch: cfg.lorebase.branch, revision: () => this.revision, usage: this.usage,
       agents: () => this.world.living().filter((e) => e.kind === 'agent').map((e) => ({ id: e.id, name: e.name, key: memoryKey(e.name) })),
+      stack: () => this.stackSpans.summary(),
       stats: () => ({
         ...this.stats, running: this.limiter.running,
         ...(this.evidence ? { signalSearches: this.evidence.stats.searches, signalCached: this.evidence.stats.cached, signalRefused: this.evidence.stats.refused, signalRefusals: { ...this.evidence.stats.refusals }, signalErrors: this.evidence.stats.errors, evidenceAttached: this.evidence.stats.attached, interviews: this.evidence.stats.interviews } : {}),
         ...(this.research ? { webSearches: this.research.stats.searches, webFetches: this.research.stats.fetches, webCached: this.research.stats.cached, webRefused: this.research.stats.refused, webRefusals: { ...this.research.stats.refusals }, webCapped: this.research.stats.capped, webErrors: this.research.stats.errors } : {}), budgetMaxUsd: game.budget.maxUsd, budgetPaused: this.budgetPaused ? 1 : 0 }),
     }, game.observatory);
+    const feed = new StackFeed();
+    const stackHost = this.decideHost();
+    this.stacks = new StackHub(stackHost, { mock: this.mock, feed, dataDir: dataDirOf(game), catalog: (e) => personCatalog(stackHost, e) });
+    this.wireStack(feed);
     this.world = this.newWorld();
     this.groups = this.newGroups();
     this.chronicle = new Chronicle(this.client, cfg.lorebase.branch, game.chronicle);
@@ -308,6 +319,48 @@ export class Game {
     });
   }
 
+  /** Capacities that act for a group; the usage of their runs is booked apart from the person's own decisions and replies. */
+  private static readonly GROUP_CAPACITIES = new Set(['propose', 'write', 'write_member', 'vote', 'ballot', 'chair', 'judge', 'route', 'lead']);
+
+  /** Whom a stack run is booked to: the person, or for a group capacity the person's group row (one per model). */
+  private stackWho(p: PersonRef, agent: string, model = p.model): { id: string; name: string; model: string; tier: string } {
+    if (!Game.GROUP_CAPACITIES.has(agent)) return { id: p.id, name: p.name, model: p.model, tier: p.tier };
+    // The provider reports the model without its `anthropic/` prefix.
+    const used = model.includes('/') || !p.model.includes('/') ? model : `${p.model.slice(0, p.model.indexOf('/') + 1)}${model}`;
+    return { id: used === p.model ? `${p.id}/group` : `${p.id}/group:${used}`, name: `${p.name}/group`, model: used, tier: 'group' };
+  }
+
+  /** What every stack run reports: usage and runs to the ledger, reasoning to the thoughts, finished runs to mnemo, spans to the tally. */
+  private wireStack(feed: StackFeed): void {
+    feed.on('usage', (u) => {
+      this.stackRunModels.set(u.runId, u.model);
+      this.usage.called(this.stackWho(u.person, u.agent, u.model), u.usage, u.costUsd);
+    });
+    feed.on('reasoning', (r) => {
+      const e = this.world.entities.get(r.person.id);
+      if (e && r.text) this.reasoned(e, r.text.slice(0, this.game.decisions.textMaxChars));
+    });
+    const keep = this.mnemo.runRecorder();
+    feed.on('run', (r) => {
+      const model = this.stackRunModels.get(r.runId);
+      this.stackRunModels.delete(r.runId);
+      this.usage.ended(this.stackWho(r.person, r.agent, model), r.status);
+      keep?.(r);
+    });
+    feed.on('telemetry', (ev) => this.stackSpans.add(ev.record));
+  }
+
+  /** The model's reasoning summary behind a call (privileged clients only). */
+  private reasoned(e: RtEntity, text: string): void {
+    this.stats.thoughts++;
+    // The summary is the model's: kept as it is, its language recorded (never translated).
+    const tl = this.game.decisions.thoughtLanguage;
+    const lang = tl ? textLanguage(text, tl.markers, tl.minHits) : undefined;
+    if (lang) this.stats.thoughtLangs[lang] = (this.stats.thoughtLangs[lang] ?? 0) + 1;
+    this.broadcastPrivileged({ type: 'say', from: e.id, to: e.id, text, kind: 'thought', ...(lang ? { lang } : {}) });
+    this.recent(this.thoughts, e.id, { at: this.now(), text, ...(lang ? { lang } : {}) });
+  }
+
   private decideHost(): DecideHost {
     return {
       world: () => this.world,
@@ -343,8 +396,7 @@ export class Game {
         const err = await this.insights.judge(code, { name: e.name, role: e.role }, verdict, reason);
         return err ? { ok: false, text: this.t('rt.act.insightJudgeFailed', { reason: this.insightReason(err) }) } : { ok: true, text: this.t('rt.act.insightJudged') };
       },
-      runSinks: () => this.mnemo.runSinks(),
-      ranModel: (who, res) => this.usage.track(who, res),
+      stacks: this.stacks,
       closed: (_e, committed) => {
         this.stats.closingRuns++;
         if (committed) this.stats.closingCommitted++;
@@ -358,15 +410,6 @@ export class Game {
         if (e.kind !== 'agent') return [];
         const hits = await this.mnemo.recall(memoryKey(e.name), query);
         return (hits ?? []).map((m) => this.t('rt.act.recallLine', { day: m.createdAt.day, text: m.text, vivid: this.t(m.fidelity >= 0.5 ? 'rt.act.vivid' : 'rt.act.faded') }).replace(/^- /, ''));
-      },
-      reasoned: (e, text) => {
-        this.stats.thoughts++;
-        // The summary is the model's: kept as it is, its language recorded (never translated).
-        const tl = this.game.decisions.thoughtLanguage;
-        const lang = tl ? textLanguage(text, tl.markers, tl.minHits) : undefined;
-        if (lang) this.stats.thoughtLangs[lang] = (this.stats.thoughtLangs[lang] ?? 0) + 1;
-        this.broadcastPrivileged({ type: 'say', from: e.id, to: e.id, text, kind: 'thought', ...(lang ? { lang } : {}) });
-        this.recent(this.thoughts, e.id, { at: this.now(), text, ...(lang ? { lang } : {}) });
       },
       consulted: (e, ev) => {
         this.recent(this.consults, e.id, { at: this.now(), tool: ev.tool, query: ev.query });
@@ -914,6 +957,8 @@ export class Game {
     }
     this.watcher.stop();
     await this.ideas.settle().catch(() => undefined);
+    await this.stacks.close().catch((err) => console.warn(`[stack] close: ${err instanceof Error ? err.message : err}`));
+    this.stacks.feed.close();
     await this.brain.close();
     this.mnemo.stop();
     await this.chronicle.stop();
@@ -1019,6 +1064,7 @@ export class Game {
         void this.insights.autoAccept(this.world.clock, living).finally(() => (this.autoAcceptBusy = false));
       }
       const living = this.world.living();
+      this.broadcastPrivileged({ type: 'stack', spans: this.stackSpans.summary() });
       console.log(`[game] day ${this.world.day} ${this.world.clockText()} ${this.world.season()} pop ${living.length} groups ${this.groups.list().length} decisions ${this.stats.decisions}+${this.stats.groupDecisions}g replies ${this.stats.replies} failures ${this.stats.failures} running ${this.limiter.running} lorebase-mcp ${this.brain.calls} calls/${this.brain.cacheHits} cached chronicle ${this.chronicle.written} written/${this.chronicle.pending} pending`);
     }
   }
@@ -1713,7 +1759,9 @@ export class Game {
   /** An idea as clients see it: its state plus where it stands against the candidacy requirements. */
   private ideaDto(i: Idea): Idea & { gate?: GateStatus & { need: { minReal: number; minSources: number; minHuman: number; minScore: number } } } {
     const g = this.gateOf(i);
-    return g && this.evidence ? { ...i, gate: { ...g, need: this.evidence.requirements() } } : i;
+    // The committee run waiting on the idea is the server's own.
+    const { committeeRun: _run, ...idea } = i;
+    return g && this.evidence ? { ...idea, gate: { ...g, need: this.evidence.requirements() } } : idea;
   }
 
   /** The missing requirements as a factual sentence. */
@@ -2021,11 +2069,17 @@ export class Game {
           this.stats.alternates += alternates.length;
           console.log(`[committee ${g.name}] ${idea.code}: alternates ${alternates.map((m) => m.name).join(', ')} (below quorum)`);
         }
-        const out = await this.groups.reviewIdea(g, brief, this.committeeMock(idea), seated, { criteria: policy.criteria } satisfies CommitteePolicy);
+        // A deferred idea that comes back goes on with the run that deferred it (its ballots are kept); otherwise a new run begins.
+        const mock = this.committeeMock(idea);
+        const review = { criteria: policy.criteria } satisfies CommitteePolicy;
+        const out = idea.committeeRun
+          ? await this.groups.resumeReview(g, idea.committeeRun, brief, mock, seated, review, idea.code)
+          : await this.groups.reviewIdea(g, brief, mock, seated, review, { idea: idea.code });
         if ('error' in out) {
           console.warn(`[committee ${g.name}] ${idea.code}: ${out.error}`);
           return;
         }
+        this.ideas.setCommitteeRun(idea.code, out.waiting ? { runId: out.runId, configHash: out.configHash, ...(out.wait ? { wait: out.wait } : {}) } : null);
         let { decision, summary } = out;
         const blocked = decision === 'approve' && (this.slotsLeft() <= 0 ? 'noSlots' : w.isFreeze() && w.r('freeze_blocks_approvals') >= 1 ? 'freeze' : undefined);
         if (blocked) {

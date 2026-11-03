@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { approvalPhase, checkBallot, checkChair, criteriaFrom, criteriaTally, demandsFrom } from './committee.ts';
+import { approvalPhase, assemblyOutcome, checkBallot, checkChair, checkFreeBallot, checkFreeChair, criteriaFrom, criteriaTally, demandsFrom, unionOf } from './committee.ts';
 import { Company } from './company.ts';
 import { closable, closingInput } from './decide.ts';
 import { hackerNewsSource, queryWords } from './signals.ts';
@@ -46,6 +46,24 @@ test('committee: the chair names known unmet criteria for a kill or defer', () =
   const ok = checkChair({ decisione: 'defer', criteri_non_soddisfatti: ['rischio', 'rischio'], sintesi: 's', richieste_fuori_policy: 'pilota' }, criteria, limits);
   assert.deepEqual(ok, { decision: 'defer', summary: 's', unmet: ['rischio'], outOfPolicy: ['pilota'] });
   assert.ok(!('error' in checkChair({ decisione: 'approve', criteri_non_soddisfatti: [], sintesi: 's' }, criteria, limits)));
+});
+
+test('committee: free votes need only a valid vote and a reason; the summary is cut', () => {
+  assert.deepEqual(checkFreeBallot({ vote: 'defer', reason: ' no pilot ' }, { maxChars: 50 }), { vote: 'defer', reason: 'no pilot', criteria: {}, unmet: [], outOfPolicy: [] });
+  assert.deepEqual(checkFreeBallot({ voto: 'maybe' }, { maxChars: 50 }), { error: 'vote' });
+  assert.deepEqual(checkFreeChair({ decision: 'kill', summary: 'abcdef' }, { maxChars: 3 }), { decision: 'kill', summary: 'abc', unmet: [], outOfPolicy: [] });
+  assert.deepEqual(checkFreeChair({ decision: 'later' }, { maxChars: 3 }), { error: 'vote' });
+});
+
+test('committee: an assembly is decided by the esteem-weighted plurality, the winning side explains', () => {
+  const vote = (member: string, v: 'approve' | 'kill' | 'defer', unmet?: string[], outOfPolicy?: string[]) => ({ member, vote: v, reason: `r-${member}`, unmet, outOfPolicy });
+  const votes = [vote('a', 'approve'), vote('b', 'kill', ['x'], ['pilot']), vote('c', 'kill', ['y'])];
+  const o = { name: (v: { member: string }) => v.member.toUpperCase(), textMax: 100, criteria: true };
+  // two lighter kills lose to one heavy approval, then win once they weigh more
+  assert.deepEqual(assemblyOutcome(votes, (m) => (m === 'a' ? 5 : 1), o), { decision: 'approve', summary: 'A: r-a', unmet: [], outOfPolicy: ['pilot'] });
+  assert.deepEqual(assemblyOutcome(votes, () => 1, o), { decision: 'kill', summary: 'B: r-b C: r-c', unmet: ['x', 'y'], outOfPolicy: ['pilot'] });
+  assert.deepEqual(assemblyOutcome(votes, () => 1, { ...o, criteria: false, textMax: 6 }), { decision: 'kill', summary: 'B: r-b' });
+  assert.deepEqual(unionOf([['a', 'b'], undefined, ['b', 'c']]), ['a', 'b', 'c']);
 });
 
 test('company: a deferral spends approval slots, never below zero', () => {

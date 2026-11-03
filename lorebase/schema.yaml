@@ -367,6 +367,9 @@ kinds:
       decision:
         description: The committee's last decision ({decision, summary, at, votes}).
         type: json
+      committee_run:
+        description: The committee run waiting for the idea's resubmission after a deferral ({runId, configHash, wait}); empty once it is let go.
+        type: json
       day:
         description: Day of the world on which it was proposed.
         type: integer

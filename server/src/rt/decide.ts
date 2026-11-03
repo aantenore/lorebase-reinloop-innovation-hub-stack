@@ -1,18 +1,22 @@
-// One person's decisions with reinloop: a PLAN call (tools commit_plan, say, form_group,
-// join_group, leave_group; the run ends as soon as a plan is committed) and a quick REPLY call
-// when spoken to (streamed text, optional `rethink`). Each person uses its own model; the mock
-// provider is only an offline fallback.
-import { agent, type Message, type MockTurn, mockProvider, type ModelRef, type ModelRequest, type RunResult, type Sink, type Tool, tool } from 'reinloop';
-import type { SimConfig } from '../config.ts';
+// One person's decisions through the agent stack of the hub (see stack/index.ts): a PLAN run (tools commit_plan,
+// say, form_group, join_group, leave_group; the run ends as soon as a plan is committed) and a quick REPLY run when
+// spoken to (streamed text, optional `rethink`). Each person has its own stack and model; the offline model
+// (`hub-mock`) plays the scripts below.
+import { resolve } from 'node:path';
+import type { CallPart, Message as StackMessage, RunInput, RunResult as StackRunResult } from '@agent-layers/core';
+import { type Message, type MockTurn, mockProvider, type ModelRef, type ModelRequest, type RunResult, type Tool, tool } from 'reinloop';
+import { ROOT, type SimConfig } from '../config.ts';
 import type { Translate } from '../i18n.ts';
 import type { Role, RuleChange } from '../lorebase/rules.ts';
 import type { Brain, ConsultEvent } from './brain.ts';
+import { runIdFrom } from '../stack/ids.ts';
+import { type Capacity, type CapResult, StackFeed, StackHub } from '../stack/index.ts';
 import type { Tier } from '../world/types.ts';
 import { AGENT_PATTERNS, cacheParams, type GameConfig, type TierDecision } from './config.ts';
+import type { PlanData } from './groups.ts';
 import { flatSteps, mockSteps, needsOf } from './mock.ts';
 import { SIGNAL_TOOL } from './evidence.ts';
 import { mockSignalUrl } from './signals.ts';
-import type { TokenUsage } from './observatory.ts';
 import { MODEL_ACTIONS, normalizeStep, type PlanStep } from './plan.ts';
 import {
   doingLine, type GroupView, groupLine, inboxBlock, look, memoryBlock, type PromptLimits, recalledBlock, rtInstructions, rtObservation, selfLine, timeLine,
@@ -45,16 +49,12 @@ export interface DecideHost {
   judgeInsight(e: RtEntity, code: string, verdict: 'approve' | 'reject', reason: string): Promise<ToolOutcome>;
   /** A group member said something while the group deliberated (reinloop pattern trace). */
   deliberated(g: { id: string; pattern: string }, memberId: string, role: string, text: string): void;
-  /** Sinks every model run reports to (run logs kept in mnemo). */
-  runSinks(): Sink[];
+  /** The agent stacks of the world's people; when absent (tests) a hub of its own is built on first use (see `stackHub`). */
+  stacks?: StackHub;
   /** A plan run needed its closing run (counted); `committed`: it ended with a plan. */
   closed?(e: RtEntity, committed: boolean): void;
-  /** A model run ended (usage and cost per agent, for the Observatory). */
-  ranModel(who: { id: string; name: string; model: string; tier: string }, res: { status: string; usage?: TokenUsage; costUsd?: number }): void;
   /** A person consulted Lorebase (shown to clients). */
   consulted(e: RtEntity, ev: ConsultEvent): void;
-  /** The model's reasoning summary behind a decision (privileged clients only). */
-  reasoned(e: RtEntity, text: string): void;
   /** What the person's private memory brings back for `query` (formatted lines; empty when none or unavailable). */
   recall(e: RtEntity, query: string): Promise<string[]>;
   /** Barter: propose an exchange, answer one addressed to you. */
@@ -169,7 +169,8 @@ export function limitsOf(cfg: GameConfig): PromptLimits {
 }
 
 /**
- * Model reference for an entity: its own model, or a scripted mock when offline. The mock's delay is in
+ * Model reference for tool-internal calls that stay on reinloop (the simulated interviews):
+ * its own model, or a scripted mock when offline. The mock's delay is in
  * game time (divided by the time scale), so a sped-up world does not leave people idle while it "thinks".
  */
 export function modelRef(host: Pick<DecideHost, 'mock' | 'world'>, model: string, script: (req: ModelRequest, i: number) => MockTurn, delayMs: number): string | ModelRef {
@@ -255,7 +256,8 @@ export function ideaTools(host: Pick<DecideHost, 't' | 'ideas'>, e: RtEntity): T
   ];
 }
 
-function socialTools(host: DecideHost, e: RtEntity): Tool[] {
+/** Social, idea and insight tools of a person. */
+export function socialTools(host: DecideHost, e: RtEntity): Tool[] {
   const t = host.t;
   const max = host.cfg.decisions.textMaxChars;
   return [
@@ -475,6 +477,112 @@ function mockIdeaCalls(host: DecideHost, e: RtEntity, roll: (salt: string) => nu
   return calls;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The stack behind decide and reply
+
+/** Static tool catalog of a person (what `StackHub` lists when a run brings no tools): faculties and social tools. */
+export function personCatalog(host: DecideHost, e: RtEntity): Tool[] {
+  const tc = tierConfig(e, host.cfg);
+  return [...faculties(host, e, { maxConsults: 0, ...(tc.maxWebCalls === undefined ? {} : { maxWebCalls: tc.maxWebCalls }) }), ...socialTools(host, e)];
+}
+
+/** Directory of the stack's files: `HUB_DATA_DIR`, else `stack.dataDir` of the game config. */
+export const dataDirOf = (cfg: Pick<GameConfig, 'stack'>): string => process.env.HUB_DATA_DIR ?? resolve(ROOT, cfg.stack.dataDir);
+
+const ownHubs = new WeakMap<object, StackHub>();
+
+/**
+ * The hub the host's decisions run on: `host.stacks` (the game's, whose feed feeds the Observatory), else, for hosts
+ * without one (tests), a hub built on first use for this world.
+ */
+export function stackHub(host: DecideHost): StackHub {
+  if (host.stacks) return host.stacks;
+  const key = host.world();
+  let hub = ownHubs.get(key);
+  if (!hub) {
+    hub = new StackHub(host, { mock: host.mock, feed: new StackFeed(), dataDir: dataDirOf(host.cfg), catalog: (e) => personCatalog(host, e) });
+    ownHubs.set(key, hub);
+  }
+  return hub;
+}
+
+let runSeq = 0;
+const runIdOf = (e: Pick<RtEntity, 'id'>, cap: string) => runIdFrom([e.id, cap], `${Date.now().toString(36)}${(++runSeq).toString(36)}`);
+
+const textMessage = (role: 'system' | 'user', text: string): StackMessage => ({ role, parts: [{ type: 'text', text }] });
+
+/** Why a run ended other than completed, as the callers log it (`stopped: timeout`). */
+function whyNot(run: Pick<StackRunResult, 'status' | 'reason'>): string {
+  const r = run.reason;
+  return `${run.status}${r ? `: ${r.detail ?? r.code}` : ''}`;
+}
+
+/** A run that failed before or outside the stack's own error handling (config, build, abort). */
+function failedRun(runId: string, err: unknown): CapResult {
+  return { run: { runId, status: 'failed', output: '', reason: { code: 'error', detail: err instanceof Error ? err.message : String(err) } } };
+}
+
+/** What a tool did in a run (for the closing run, which needs the results of the calls the budget cut off). */
+interface Executed {
+  name: string;
+  content: string;
+  isError: boolean;
+}
+
+interface ToolLog {
+  /** Once set, only `commit_plan` answers; the other tools say the decision is closed. */
+  closing: boolean;
+  refused: string;
+  ran: Executed[];
+}
+
+/** The run's tools, recording what they answered and refusing everything but `commit_plan` once the run is closing. */
+function logged(tools: Tool[], log: ToolLog): Tool[] {
+  return tools.map((t) => ({
+    ...t,
+    run: async (args, ctx) => {
+      if (log.closing && t.name !== 'commit_plan') return { content: log.refused, isError: true };
+      try {
+        const raw = await t.run(args, ctx);
+        const out = (typeof raw === 'string' ? { content: raw } : raw) as { content: string; isError?: boolean };
+        log.ran.push({ name: t.name, content: out.content, isError: !!out.isError });
+        return raw;
+      } catch (err) {
+        log.ran.push({ name: t.name, content: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true });
+        throw err;
+      }
+    },
+  }));
+}
+
+/** A plan run that may get a closing run: it ended on its own, or on its turn or tool-call budget. Pure. */
+export function closableRun(run: Pick<StackRunResult, 'status' | 'reason'>): boolean {
+  return run.status === 'completed' || (run.status === 'stopped' && run.reason?.code === 'limit' && /^(maxTurns|maxToolCalls)$/.test(run.reason.detail ?? ''));
+}
+
+/**
+ * The conversation of a run followed by the closing notice. The calls of the last model reply that the run cut off
+ * (budget) get their results first: what the tools answered, or `refused` for calls that never ran. Pure.
+ */
+export function closingMessages(transcript: StackMessage[], ran: Executed[], notice: string, refused: string): StackMessage[] {
+  const out = [...transcript];
+  const last = out.at(-1);
+  const calls = last?.role === 'assistant' ? last.parts.filter((p): p is CallPart => p.type === 'call') : [];
+  if (calls.length) {
+    const pool = [...ran];
+    out.push({
+      role: 'tool',
+      parts: calls.map((c) => {
+        const i = pool.findIndex((r) => c.tool === r.name || c.tool.endsWith(`__${r.name}`));
+        const r = i >= 0 ? pool.splice(i, 1)[0] : undefined;
+        return { type: 'result', callId: c.id, ok: r ? !r.isError : false, text: r ? r.content : refused };
+      }),
+    });
+  }
+  out.push(textMessage('user', notice));
+  return out;
+}
+
 /** Asks one person what it will do next; a Failure says why no plan was committed. */
 export async function decide(host: DecideHost, e: RtEntity, why: string, stop?: AbortSignal): Promise<Decision | Failure> {
   const t = host.t;
@@ -483,52 +591,52 @@ export async function decide(host: DecideHost, e: RtEntity, why: string, stop?: 
   const tc = tierConfig(e, cfg);
   const horizon = w.r('plan_horizon_minutes') * tc.horizonFactor;
   const textMax = cfg.decisions.textMaxChars;
-  let committed: Decision | undefined;
   const commit = tool<{ reason: string; steps: unknown[] }>('commit_plan', t('rt.tools.commitPlan'), planSchema(t, textMax, false, tc.maxSteps), (args) => {
     const steps = normalizeSteps(args?.steps, textMax, tc.maxSteps);
     if (!steps.length) return { content: t('rt.act.noSteps'), isError: true };
-    committed = { steps, reason: String(args?.reason ?? '').slice(0, textMax) };
-    // The plan is all this call is for: the run ends without another model turn.
-    return { content: t('rt.act.planned', { n: steps.length }), stop: true };
+    // The plan is all this call is for: the run ends without another model turn, and the plan comes out of the run.
+    return { content: t('rt.act.planned', { n: steps.length }), stop: true, data: { summary: String(args?.reason ?? '').slice(0, textMax), steps } satisfies PlanData };
   });
-  // Closing run: the same tools are listed (the cached prompt prefix stays valid), only commit_plan answers.
-  let closing = false;
-  const runner = (budget: { maxTurns: number; maxToolCalls?: number }) => agent({
-    name: e.id,
-    model: modelRef(host, e.model, (req) => mockDecision(host, e, tc, req), cfg.mock.thinkDelayMs),
-    params: { ...cfg.decisions.modelParams.plan, ...cacheParams(cfg), maxTokens: tc.maxOutputTokens },
-    instructions: rtInstructions(t, e, host.roleOf(e.role), { horizon }, !!host.research, !!host.evidence),
-    tools: [commit, ...socialTools(host, e), ...faculties(host, e, tc)],
-    budget,
-    toolSettings: { concurrency: 1 },
-    middleware: [{ name: 'closing-turn', beforeTool: (call) => (closing && call.name !== 'commit_plan' ? { deny: t('rt.act.decisionClosed') } : undefined) }],
-  });
+  // The same tools in both runs (the cached prompt prefix stays valid); in the closing run only commit_plan answers.
+  const log: ToolLog = { closing: false, refused: t('rt.act.decisionClosed'), ran: [] };
+  const tools = logged([commit, ...socialTools(host, e), ...faculties(host, e, tc)], log);
+  const instructions = rtInstructions(t, e, host.roleOf(e.role), { horizon }, !!host.research, !!host.evidence);
   const prompt = rtObservation(t, w, e, why, host.groups(), host.roleTitle, limitsOf(cfg), host.changedLaws(e), host.perceived);
   // What the body went through is counted again from this thought on.
   w.resetBody(e);
   const signal = AbortSignal.any([AbortSignal.timeout(decisionTimeoutMs(cfg, w)), ...(stop ? [stop] : [])]);
-  const once = async (input: string | Message[], budget: { maxTurns: number; maxToolCalls?: number }): Promise<RunResult> => {
-    const handle = runner(budget).stream(input, { signal, sinks: host.runSinks() });
-    let thought = '';
-    for await (const ev of handle) if (ev.type === 'thinking_delta') thought += (ev.data as { text: string }).text;
-    const res = await handle.result;
-    host.ranModel(e, res);
-    // With thinking display `omitted` (config) there is no summary: the plan reason is the visible thought (commitPlan).
-    if (thought.trim()) host.reasoned(e, thought.trim().slice(0, textMax));
-    return res;
+  const hub = stackHub(host);
+  const delayMs = cfg.mock.thinkDelayMs / Math.max(1, w.timeScale);
+  const once = async (cap: 'decide' | 'decide_close', input: RunInput): Promise<CapResult> => {
+    const runId = runIdOf(e, cap);
+    let out: CapResult;
+    try {
+      const ps = await hub.stackFor(e);
+      // `decide_close` is the closing budget of the same person (agent of the person config; see Capacity in stack/index.ts).
+      const s = ps.stream(cap as Capacity, input, {
+        sessionId: runId, runId, signal, tools,
+        ...(host.mock ? { mock: (req, i) => ({ delayMs, ...mockDecision(host, e, tc, req) }) } : {}),
+      });
+      for await (const _ of s) { /* the events are not needed; the run is driven by reading them */ }
+      out = await s.result;
+    } catch (err) {
+      out = failedRun(runId, err);
+    }
+    return out;
   };
-  let res = await once(prompt, { maxTurns: tc.maxTurns, maxToolCalls: tc.maxConsults + tc.maxTurns * 4 });
+  let out = await once('decide', { messages: [textMessage('system', instructions), textMessage('user', prompt)] });
   const ct = cfg.decisions.closingTurn;
-  if (!committed && ct?.enabled && closable(res) && !signal.aborted) {
-    closing = true;
-    res = await once(closingInput(res.messages, t('rt.observation.closingTurn')), { maxTurns: ct.maxTurns });
-    host.closed?.(e, !!committed);
+  if (!out.plan && ct?.enabled && closableRun(out.run) && out.transcript && !signal.aborted) {
+    log.closing = true;
+    out = await once('decide_close', { messages: closingMessages(out.transcript, log.ran, t('rt.observation.closingTurn'), log.refused) });
+    host.closed?.(e, !!out.plan);
   }
-  if (committed) return committed;
-  return { error: res.status === 'completed' ? 'no plan committed' : `${res.status}${res.reason ? `: ${res.reason}` : ''}` };
+  if (out.plan) return { steps: out.plan.steps as PlanStep[], reason: out.plan.summary };
+  return { error: out.run.status === 'completed' ? 'no plan committed' : whyNot(out.run) };
 }
 
-/** A plan run that may get a closing run: it ended on its own, or on its turn or tool-call budget. Pure. */
+/** Closing helpers in reinloop's message form, kept until the group runs move to the stack. */
+/** A reinloop plan run that may get a closing run: it ended on its own, or on its turn or tool-call budget. Pure. */
 export function closable(res: Pick<RunResult, 'status' | 'reason'>): boolean {
   return res.status === 'completed' || (res.status === 'stopped' && /^budget:(maxTurns|maxToolCalls)$/.test(res.reason ?? ''));
 }
@@ -571,16 +679,7 @@ export async function reply(host: DecideHost, e: RtEntity, speaker: RtEntity, on
   };
   const consults = Math.max(0, cfg.conversation.replyMaxConsults);
   const lorebase = consults > 0 ? host.brain.lorebaseTools({ left: consults, onConsult: (ev) => host.consulted(e, ev) }) : [];
-  const runner = agent({
-    name: e.id,
-    model: modelRef(host, e.model, mockReply, cfg.mock.replyDelayMs),
-    params: { ...cfg.decisions.modelParams.reply, ...cacheParams(cfg), maxTokens: cfg.conversation.replyMaxOutputTokens },
-    instructions: `${rtInstructions(t, e, host.roleOf(e.role), { horizon: w.r('plan_horizon_minutes') * tc.horizonFactor }, !!host.research, !!host.evidence)}\n${t('rt.replyInstructions')}`,
-    tools: [rethinkTool, ...lorebase],
-    // Consultations, plus rethink and one refused extra call, then the answer.
-    budget: { maxTurns: cfg.conversation.replyMaxTurns, maxToolCalls: consults + 2 },
-    toolSettings: { concurrency: 1 },
-  });
+  const instructions = `${rtInstructions(t, e, host.roleOf(e.role), { horizon: w.r('plan_horizon_minutes') * tc.horizonFactor }, !!host.research, !!host.evidence)}\n${t('rt.replyInstructions')}`;
   const recalled = await host.recall(e, `${speaker.name}: ${lastHeard(e, speaker)}`).catch(() => []);
   const prompt = [
     timeLine(t, w),
@@ -596,24 +695,43 @@ export async function reply(host: DecideHost, e: RtEntity, speaker: RtEntity, on
   ].filter(Boolean).join('\n\n');
   let text = '';
   const signal = AbortSignal.any([AbortSignal.timeout(cfg.conversation.replyTimeoutMs), ...(stop ? [stop] : [])]);
-  const handle = runner.stream(prompt, { signal, sinks: host.runSinks() });
-  for await (const ev of handle) {
-    // Speech before and after a consultation is one answer; nothing is said after rethink.
-    if (rethink) continue;
-    if (ev.type === 'turn_start' && text && !/\s$/.test(text)) {
-      text += ' ';
-      onDelta(' ');
+  const hub = stackHub(host);
+  const runId = runIdOf(e, 'reply');
+  const delayMs = cfg.mock.replyDelayMs / Math.max(1, w.timeScale);
+  let out: CapResult;
+  try {
+    const ps = await hub.stackFor(e);
+    const s = ps.stream('reply', { messages: [textMessage('system', instructions), textMessage('user', prompt)] }, {
+      sessionId: runId, runId, signal, tools: [rethinkTool, ...lorebase],
+      ...(host.mock ? { mock: () => ({ delayMs, ...mockReply() }) } : {}),
+    });
+    // Speech before and after a consultation is one answer (a model reply with tool calls is the turn boundary);
+    // nothing is said after rethink.
+    let rethought = false;
+    let boundary = false;
+    for await (const ev of s) {
+      if (rethought) continue;
+      if (ev.type === 'tool.call') rethought = /(^|__)rethink$/.test(String(ev.tool));
+      else if (ev.type === 'model.reply') boundary = Number(ev.calls) > 0;
+      else if (ev.type === 'text') {
+        const d = String(ev.text ?? '');
+        if (!d) continue;
+        if (boundary && text && !/\s$/.test(text)) {
+          text += ' ';
+          onDelta(' ');
+        }
+        boundary = false;
+        text += d;
+        onDelta(d);
+      }
     }
-    if (ev.type === 'text_delta') {
-      const d = (ev.data as { text: string }).text;
-      text += d;
-      onDelta(d);
-    }
+    out = await s.result;
+  } catch (err) {
+    out = failedRun(runId, err);
   }
-  const res = await handle.result;
-  host.ranModel(e, res);
   const said = text.trim();
   // A run cut short (max_tokens is reported as such) is a failure; a completed run without words is a silence.
-  const error = res.status === 'completed' ? undefined : `${res.status}${res.reason ? `: ${res.reason}` : ''}`;
-  return { text: said, rethink, ...(error ? { error } : {}) };
+  const cut = out.run.reason?.detail === 'max_tokens';
+  const error = out.run.status === 'completed' && !cut ? undefined : whyNot(out.run);
+  return { text: said, rethink: rethink || !!out.rethink, ...(error ? { error } : {}) };
 }

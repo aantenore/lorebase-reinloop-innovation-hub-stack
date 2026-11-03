@@ -228,6 +228,8 @@ export interface GameConfig {
    * is cached and the volatile perception comes last. `groupTtl` applies to group members' runs (default `ttl`).
    */
   promptCache: { enabled: boolean; ttl: CacheTtl; groupTtl?: CacheTtl };
+  /** Agent stack: where its files (telemetry, group run journal) live; `HUB_DATA_DIR` replaces it. */
+  stack: { dataDir: string };
   /** Web research (reinloop web tools): backend, limits, cache; quotas and excluded domains are policies. */
   research: ResearchConfig;
   /** Evidence of ideas: public signals (reinloop signalTools), simulated interviews, human validations; numbers that bind are policies. */

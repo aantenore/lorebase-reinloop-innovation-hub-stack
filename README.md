@@ -125,12 +125,40 @@ flowchart LR
   vote with structured output, the chair decides; an assembly decides by esteem-weighted plurality).
 - `server/src/rt/decide.ts`, `mind.ts`, `prompt.ts`: one decision loop per person, tools, observation.
 - `server/src/rt/game.ts`: the host: policies from Lorebase, ideas, committee, protocol, REST.
+- `server/src/stack/`: the agent stack (next section).
 - `lorebase/`: schema, policies and roles, signals, methods and breakthroughs.
+
+### Agent stack
+
+Thinking runs on agent-layers and agent-plexus,
+with reinloop as the runtime of each agent and Lorebase as the knowledge. `StackHub` (`server/src/stack/`) builds one
+agent-layers stack per person from `config/stacks/person.json` (profile = tier; one agent per capacity: decide, reply,
+propose, write, vote, ballot, chair, ...), with the model (Anthropic through reinloop's provider, prompt cache and
+thinking kept), the world's tools, the Lorebase read tools (branch and domain pinned by the hub, never by the model) and
+telemetry (`data/telemetry/stack.jsonl`). Group decisions are agent-plexus systems over the members' own stacks
+(`stack/topologies.ts`: orchestrator, council, router, chain, mentor, assembly; the committee is a graph that waits
+for the resubmission of a deferred idea; journal in `data/plexus/journal.db`, base config `config/plexus/base.json`).
+The idea keeps its waiting committee run in its Lorebase record (`committee_run`), so a deferral survives a restart;
+re-apply the schema (`npm run lorebase:seed`) once for that attribute.
+
+What the stacks report (usage with cache counts and price, reasoning, finished runs, spans) goes through one
+`StackFeed` to the usage ledger of the Observatory, the thoughts shown to privileged clients, the mnemo run store and a
+privileged `{type:'stack'}` WebSocket message (span totals of `agent.*` and `plexus.*`).
+
+- The stack packages come from npm (`@agent-layers/*` ^0.4.1, `@agent-plexus/*` ^0.2.0). To test unreleased sibling
+  checkouts, `npm run stack:pin` temporarily re-vendors them: it builds and packs the tarballs into `vendor/`
+  (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF=HEAD` builds the committed state) and points `package.json`
+  at them with `file:` entries. Do not commit that state: `git checkout package.json package-lock.json && rm -rf vendor`
+  and `npm install` return to the registry ranges.
+- Mock vs live: without `ANTHROPIC_API_KEY` (or with `--mock`) every stack runs on the offline `hub-mock` model, which
+  calls the same scripted decisions as before and still goes through the whole stack (tools, plexus, feed). Live uses
+  `hub-anthropic`. Files go to `stack.dataDir` (`config/game.json`, default `data/`; `HUB_DATA_DIR` replaces it).
+- Where to look: `docs/agent-stack-port.md` (design and decisions).
 
 ## Quickstart
 
 Requirements: Node >= 22.18, Docker, the `lorebase` checkout next to this one (Keeper and Herald are built
-from it). reinloop is pinned in `vendor/`.
+from it). reinloop, agent-layers and agent-plexus come from npm (see Agent stack for testing unreleased checkouts).
 
 ```bash
 npm install
@@ -253,7 +281,7 @@ Seeded from `lorebase/rules.seed.yaml` (Kind `Rule`). The ones about ideas and t
 | `slot_scadono_a_fine_trimestre` | 1 | unused approval slots are lost at the end of the quarter (0: they carry over); perception and the committee brief say how many are left and on which day and hour they expire |
 | `min_idea_reviewers` | 2 | reviews by non-authors needed to submit |
 | `committee_quorum` | 2 | committee members present for it to decide; every seated member votes (`ideas.committee.maxVoters`, 0 = all) |
-| `criteri_comitato` | 1 | the committee votes on the criteria of the rules `criterio_comitato_*` with value 1: a ballot (`vota_idea`) gives a verdict per criterion, a kill or defer names an unmet one, demands outside the criteria are recorded as out of policy; the chair records the decision with `decidi_idea` (0: free votes) |
+| `criteri_comitato` | 1 | the committee votes on the criteria of the rules `criterio_comitato_*` with value 1: a ballot (`vota_idea`) gives a verdict per criterion, a kill or defer names an unmet one, demands outside the criteria are recorded as out of policy; the chair records the decision with `decide_idea` (0: free votes) |
 | `criterio_comitato_prove_del_problema`, `_concorrenza`, `_fattibilita`, `_rischio`, `_coerenza_strategica` | 1 each | the criteria (their text is what the members read; set one to 0 to drop it, add a rule with the prefix to add one) |
 | `fase_approvazione` | 1 | what an approval funds: 1 concept exploration (paying customers belong to the pilot stage, outside the committee's scope), 2 pilot, 3 scale (`ideas.committee.phases`) |
 | `costo_del_rinvio` | 1 | approval slots of the quarter a deferral consumes when the idea meets the candidacy requirements (0: none) |

@@ -576,6 +576,9 @@
       "pollMs": 500
     }
   },
+  "stack": {
+    "dataDir": "data"
+  },
   "observatory": {
     "cacheMs": 5000,
     "maxLimit": 200,
@@ -702,7 +705,8 @@
         "pilot",
         "scale"
       ],
-      "demandsMax": 4
+      "demandsMax": 4,
+      "maxDeferrals": 3
     },
     "sourcesMax": 8,
     "sourceTitleMaxChars": 120,

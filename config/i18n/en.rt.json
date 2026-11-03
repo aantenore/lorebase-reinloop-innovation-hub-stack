@@ -409,7 +409,14 @@
       "revise": "Situation:\n{{task}}\n\nPrevious plan:\n{{candidate}}\n\nRevise it taking this into account: {{feedback}}"
     },
     "commitPlan": "Fix the proposed common plan: a list of steps, each with who (id of the member doing it).",
-    "planCaptured": "plan recorded"
+    "planCaptured": "plan recorded",
+    "delegateTool": "Ask one member of the group what they propose to do, then you decide. Members you can ask:",
+    "delegated": "you asked {name}; their answer comes next",
+    "noMember": "no such member; choose one of: {members}",
+    "routeTool": "Choose the member best suited to decide the common plan.",
+    "routed": "{name} decides",
+    "verdictTool": "Give your verdict on the proposed plan: pass is true only if it is fine as it is; otherwise feedback says what to change, in English.",
+    "voteTool": "Vote for the proposal you prefer: choice is its number in the list, reason says why in one sentence."
   },
   "events": {
     "formed": "The group {name} ({pattern}) is born: {members}",
@@ -763,8 +770,8 @@
     "shelter": "a desk"
   },
   "committee": {
-    "voteTask": "{brief}\n\nYou are {name} (id {id}), member of {group}. Vote on the idea: approve (portfolio), kill or defer (back to the authors). Answer only with JSON: {\"vote\": \"approve\" | \"kill\" | \"defer\", \"reason\": \"why, in one sentence\"}.",
-    "chairTask": "{brief}\n\nThe members' votes:\n{votes}\n\nYou are {name} (id {id}) and chair {group}. Decide for the committee: approve, kill or defer, and write the committee's reasons in summary, one or two sentences. Answer only with JSON: {\"decision\": \"approve\" | \"kill\" | \"defer\", \"summary\": \"...\"}.",
+    "voteTask": "{brief}\n\nYou are {name} (id {id}), member of {group}. Vote on the idea: approve (portfolio), kill or defer (back to the authors). Your vote is recorded with the vota_idea tool (vote: approve, kill or defer; reason: why, in one sentence).",
+    "chairTask": "{brief}\n\nThe members' votes:\n{votes}\n\nYou are {name} (id {id}) and chair {group}. Decide for the committee: approve, kill or defer, and write the committee's reasons in summary, one or two sentences. The committee's decision is recorded with the decide_idea tool (decision: approve, kill or defer; summary: the reasons).",
     "voteLine": "- {name}: {vote} ({reason})",
     "noVotes": "- no valid vote",
     "vote": {
@@ -785,7 +792,7 @@
     "noEvidence": "- none",
     "alternates": "ALTERNATES: {names}, with no conflict of interest on this idea, sit by policy (supplenti_comitato_per_anzianita) up to the quorum of {quorum}.",
     "voteTaskCriteria": "{brief}\n\nYou are {name} (id {id}), member of the {group}. Your vote on the idea is recorded with the vota_idea tool.",
-    "chairTaskCriteria": "{brief}\n\nThe members' votes:\n{votes}\n\nYou are {name} (id {id}) and chair the {group}. The committee's decision is recorded with the decidi_idea tool.",
+    "chairTaskCriteria": "{brief}\n\nThe members' votes:\n{votes}\n\nYou are {name} (id {id}) and chair the {group}. The committee's decision is recorded with the decide_idea tool.",
     "voteLineCriteria": "- {name}: {vote} ({reason}); unmet criteria: {unmet}; out-of-policy demands: {extra}",
     "none": "none",
     "policyBlock": "COMMITTEE POLICY:\n- criteri_comitato: the committee votes on these criteria\n{criteria}\n- fase_approvazione: {phase}\n- costo_del_rinvio: {cost}",
@@ -801,6 +808,8 @@
     "outOfPolicyNote": "Out-of-policy demands: {demands}.",
     "slotsSpentNote": "By policy costo_del_rinvio the deferral consumed {n} approval slot(s); {slots} left this quarter.",
     "ballot": {
+      "toolFree": "Records your vote on the idea in the committee's minutes: approve (funded), kill (dropped) or defer (back to the authors), and the reason in one sentence.",
+      "chairToolFree": "Records the committee's decision on the idea: approve, kill or defer, and the summary of the reasons in one or two sentences.",
       "tool": "Records your vote on the idea in the committee's minutes: for each criterion of policy criteri_comitato whether it is met, with a note; the vote: approve (funded in the phase of policy fase_approvazione), kill (dropped) or defer (back to the authors); the reason. By policy a kill or defer vote has at least one unmet criterion. Demands that match no criterion of the policy go in richieste_fuori_policy and the minutes record them as out of policy.",
       "chairTool": "Records the committee's decision on the idea: approve, kill or defer, the unmet criteria of policy criteri_comitato and the summary of the reasons. By policy a kill or defer decision names at least one unmet criterion. Demands that match no criterion of the policy go in richieste_fuori_policy and the minutes record them as out of policy.",
       "criteria": "one verdict per criterion of policy criteri_comitato",

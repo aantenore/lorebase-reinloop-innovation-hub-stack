@@ -54,6 +54,15 @@ export interface CommitteeVote {
   outOfPolicy?: string[];
 }
 
+/** The committee run that deferred an idea and waits for its resubmission (the journal keeps the ballots already cast). */
+export interface CommitteeRunRef {
+  runId: string;
+  /** Hash of the committee system's config when the run began: another one cannot replay the run. */
+  configHash: string;
+  /** The wait the resubmission answers. */
+  wait?: string;
+}
+
 export interface Idea {
   code: string;
   title: string;
@@ -82,6 +91,8 @@ export interface Idea {
   sources: IdeaSource[];
   /** Evidence behind it (Evidence Records on its branch), oldest first. */
   evidence: Evidence[];
+  /** The committee run waiting on this idea's resubmission after a deferral (kept in the idea's record: it survives a restart). */
+  committeeRun?: CommitteeRunRef | null;
   /**
    * The committee's last word on it (`recused`: members who abstained for a conflict of interest, names; `unmet`: the
    * policy criteria the decision names as unmet; `outOfPolicy`: demands recorded outside the policy criteria; `phase`:
@@ -140,6 +151,8 @@ export interface IdeasConfig {
     phases: string[];
     /** Demands outside the policy kept per ballot. */
     demandsMax: number;
+    /** Deferrals one committee run keeps waiting for (the next one starts a new run). */
+    maxDeferrals: number;
   };
   /**
    * Policy keys (Lorebase `Rule` records, value >= 1 means on): `conflictOfInterest` keeps the champion and the
@@ -285,6 +298,8 @@ export function ideaRow(i: Idea, session: string): Record<string, unknown> {
     risks: i.risks, tags: i.tags, stage: i.stage, champion: i.champion ?? '', authors: i.authors, scores: i.scores ?? {}, branch: i.branch,
     proposal_id: i.proposalId ?? '', quarter: i.quarter, signals: i.signals, sources: i.sources, history: i.history, decision: i.decision ?? {}, session,
     day: i.history[0]?.at.day ?? 0,
+    // Written once an idea has had a run (an empty object once it is let go).
+    ...(i.committeeRun !== undefined ? { committee_run: i.committeeRun ?? {} } : {}),
   };
 }
 
@@ -304,6 +319,8 @@ export function ideaFromRecord(r: Pick<RecordItem, 'key' | 'values'>): Idea {
   const v = r.values;
   const scores = json<Partial<Scores>>(v.scores, {});
   const decision = json<Idea['decision'] | Record<string, never>>(v.decision, {});
+  const run = json<Partial<CommitteeRunRef>>(v.committee_run, {});
+  const committeeRun = typeof run.runId === 'string' && run.runId && typeof run.configHash === 'string' ? { runId: run.runId, configHash: run.configHash, ...(typeof run.wait === 'string' && run.wait ? { wait: run.wait } : {}) } : undefined;
   return {
     code: String(v.code ?? r.key), title: String(v.title ?? ''), problem: String(v.problem ?? ''), users: String(v.users ?? ''), solution: String(v.solution ?? ''),
     differentiation: String(v.differentiation ?? ''), feasibility: String(v.feasibility ?? ''), risks: String(v.risks ?? ''),
@@ -312,6 +329,7 @@ export function ideaFromRecord(r: Pick<RecordItem, 'key' | 'values'>): Idea {
     scores: SCORE_KEYS.every((k) => typeof scores[k] === 'number') ? (scores as Scores) : null, reviews: [], branch: String(v.branch ?? ''),
     proposalId: v.proposal_id ? String(v.proposal_id) : null, quarter: String(v.quarter ?? ''), history: json<IdeaEvent[]>(v.history, []),
     signals: json<string[]>(v.signals, []), sources: json<IdeaSource[]>(v.sources, []), evidence: [], decision: decision && 'decision' in decision ? (decision as Idea['decision']) : null,
+    ...(committeeRun ? { committeeRun } : {}),
   };
 }
 
@@ -376,6 +394,13 @@ export class IdeaBook {
   /** Game clock at which a pitch was submitted (0 when it predates this run), undefined when it is not waiting. */
   submittedClock(code: string): number | undefined {
     return this.submittedAt.get(code);
+  }
+
+  /** Keeps (or, with null, forgets) the committee run that waits on an idea's resubmission. */
+  setCommitteeRun(code: string, run: CommitteeRunRef | null): void {
+    const i = this.get(code);
+    // An idea that never had a run has nothing to forget (and nothing to write).
+    if (i && (run || i.committeeRun)) i.committeeRun = run;
   }
 
   /** Ideas waiting for the committee, oldest submission first. */

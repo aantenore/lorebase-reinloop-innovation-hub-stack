@@ -409,7 +409,14 @@
       "revise": "Situazione:\n{{task}}\n\nPiano precedente:\n{{candidate}}\n\nRivedilo tenendo conto di questo: {{feedback}}"
     },
     "commitPlan": "Fissa il piano comune proposto: una lista di passi, ognuno con who (id del membro che lo fa).",
-    "planCaptured": "piano registrato"
+    "planCaptured": "piano registrato",
+    "delegateTool": "Chiedi a un membro del gruppo cosa propone di fare, poi decidi tu. Membri a cui puoi chiedere:",
+    "delegated": "hai chiesto a {name}; la sua risposta arriva dopo",
+    "noMember": "membro inesistente; scegline uno tra: {members}",
+    "routeTool": "Scegli il membro più adatto a decidere il piano comune.",
+    "routed": "decide {name}",
+    "verdictTool": "Dai il tuo giudizio sul piano proposto: pass è true solo se va bene così com'è; altrimenti feedback dice cosa cambiare, in italiano.",
+    "voteTool": "Vota la proposta che preferisci: choice è il suo numero nell'elenco, reason il perché in una frase."
   },
   "events": {
     "formed": "Nasce il gruppo {name} ({pattern}): {members}",
@@ -763,8 +770,8 @@
     "shelter": "una postazione"
   },
   "committee": {
-    "voteTask": "{brief}\n\nSei {name} (id {id}), membro del {group}. Esprimi il tuo voto sull'idea: approve (entra nel portafoglio), kill (viene scartata) o defer (torna agli autori). Rispondi solo con JSON: {\"vote\": \"approve\" | \"kill\" | \"defer\", \"reason\": \"perché, in una frase, in italiano\"}.",
-    "chairTask": "{brief}\n\nI voti dei membri:\n{votes}\n\nSei {name} (id {id}) e presiedi il {group}. Decidi per il comitato: approve, kill o defer, e scrivi in summary la motivazione del comitato in una o due frasi, in italiano. Rispondi solo con JSON: {\"decision\": \"approve\" | \"kill\" | \"defer\", \"summary\": \"...\"}.",
+    "voteTask": "{brief}\n\nSei {name} (id {id}), membro del {group}. Esprimi il tuo voto sull'idea: approve (entra nel portafoglio), kill (viene scartata) o defer (torna agli autori). Il tuo voto si registra con lo strumento vota_idea (vote: approve, kill o defer; reason: perché, in una frase, in italiano).",
+    "chairTask": "{brief}\n\nI voti dei membri:\n{votes}\n\nSei {name} (id {id}) e presiedi il {group}. Decidi per il comitato: approve, kill o defer, e scrivi in summary la motivazione del comitato in una o due frasi, in italiano. La decisione del comitato si registra con lo strumento decide_idea (decision: approve, kill o defer; summary: la motivazione).",
     "voteLine": "- {name}: {vote} ({reason})",
     "noVotes": "- nessun voto valido",
     "vote": {
@@ -785,7 +792,7 @@
     "noEvidence": "- nessuna",
     "alternates": "SUPPLENTI: {names}, senza conflitto di interessi su questa idea, siedono per policy (supplenti_comitato_per_anzianita) fino al quorum di {quorum}.",
     "voteTaskCriteria": "{brief}\n\nSei {name} (id {id}), membro del {group}. Il tuo voto sull'idea si registra con lo strumento vota_idea; i testi sono in italiano.",
-    "chairTaskCriteria": "{brief}\n\nI voti dei membri:\n{votes}\n\nSei {name} (id {id}) e presiedi il {group}. La decisione del comitato si registra con lo strumento decidi_idea; i testi sono in italiano.",
+    "chairTaskCriteria": "{brief}\n\nI voti dei membri:\n{votes}\n\nSei {name} (id {id}) e presiedi il {group}. La decisione del comitato si registra con lo strumento decide_idea; i testi sono in italiano.",
     "voteLineCriteria": "- {name}: {vote} ({reason}); criteri non soddisfatti: {unmet}; richieste fuori policy: {extra}",
     "none": "nessuno",
     "policyBlock": "POLICY DEL COMITATO:\n- criteri_comitato: il comitato vota su questi criteri\n{criteria}\n- fase_approvazione: {phase}\n- costo_del_rinvio: {cost}",
@@ -801,6 +808,8 @@
     "outOfPolicyNote": "Richieste fuori policy: {demands}.",
     "slotsSpentNote": "Per policy costo_del_rinvio il rinvio ha consumato {n} slot di approvazione; ne restano {slots} nel trimestre.",
     "ballot": {
+      "toolFree": "Registra il tuo voto sull'idea nel verbale del comitato: approve (finanziata), kill (scartata) o defer (torna agli autori), e la motivazione in una frase.",
+      "chairToolFree": "Registra la decisione del comitato sull'idea: approve, kill o defer, e la sintesi della motivazione in una o due frasi.",
       "tool": "Registra il tuo voto sull'idea nel verbale del comitato: per ogni criterio della policy criteri_comitato se è soddisfatto, con una nota; il voto: approve (finanziata nella fase della policy fase_approvazione), kill (scartata) o defer (torna agli autori); il motivo. Per policy un voto kill o defer ha almeno un criterio non soddisfatto. Le richieste che non corrispondono a un criterio della policy stanno in richieste_fuori_policy e il verbale le registra come fuori policy.",
       "chairTool": "Registra la decisione del comitato sull'idea: approve, kill o defer, i criteri della policy criteri_comitato non soddisfatti e la sintesi della motivazione. Per policy una decisione kill o defer nomina almeno un criterio non soddisfatto. Le richieste che non corrispondono a un criterio della policy stanno in richieste_fuori_policy e il verbale le registra come fuori policy.",
       "criteria": "un giudizio per ogni criterio della policy criteri_comitato",

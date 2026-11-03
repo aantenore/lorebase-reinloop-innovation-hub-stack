@@ -1,7 +1,7 @@
 // Client of mnemo, the private memory service (services/mnemo). Agents never reach it
 // directly: their remember/recall tools and the world's own memories of what they lived go
 // through here. Failures never stop the world: a memory that cannot be stored is lost.
-import type { RunEvent, Sink } from 'reinloop';
+import type { RunEndEvent } from '../stack/feed.ts';
 import type { MemoryConfig } from './config.ts';
 import type { SocietySnapshot } from './society.ts';
 
@@ -159,21 +159,28 @@ export class Mnemo {
 
   private lines: ConversationLine[] = [];
   private lineTimer: NodeJS.Timeout | undefined;
-  private runEvents: RunEvent[] = [];
+  private runEvents: Array<Record<string, unknown>> = [];
   private runTimer: NodeJS.Timeout | undefined;
 
-  /** Sink keeping reinloop run logs in mnemo (`runStore`), minus the event types in `runSkipEvents`. */
-  runSinks(): Sink[] {
-    if (!this.enabled || !this.cfg.runStore) return [];
+  /**
+   * Listener for the stack feed's finished runs that keeps them in mnemo (`runStore`), minus the event types in
+   * `runSkipEvents`. A run is a `run_start` (agent: the person, capacity) and a `run_end` event under its run id.
+   */
+  runRecorder(): ((ev: RunEndEvent) => void) | undefined {
+    if (!this.enabled || !this.cfg.runStore) return undefined;
     const skip = new Set(this.cfg.runSkipEvents);
-    return [{
-      name: 'mnemo-runs',
-      onEvent: (ev) => {
-        if (skip.has(ev.type)) return;
-        this.runEvents.push(ev);
-        this.runTimer ??= setTimeout(() => void this.flushRuns(), this.cfg.runFlushMs);
-      },
-    }];
+    const push = (ev: Record<string, unknown> & { type: string }) => {
+      if (skip.has(ev.type)) return;
+      this.runEvents.push(ev);
+      this.runTimer ??= setTimeout(() => void this.flushRuns(), this.cfg.runFlushMs);
+    };
+    return (ev) => {
+      push({ runId: ev.runId, type: 'run_start', at: ev.startedAt, data: { agent: ev.person.id, capacity: ev.agent } });
+      push({
+        runId: ev.runId, type: 'run_end', at: ev.startedAt + ev.durationMs,
+        data: { status: ev.status, ...(ev.reason ? { reason: ev.reason } : {}), durationMs: ev.durationMs },
+      });
+    };
   }
 
   private async flushRuns(): Promise<void> {
