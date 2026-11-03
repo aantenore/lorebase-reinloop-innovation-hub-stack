@@ -9,6 +9,7 @@ import { ROOT, type SimConfig } from '../config.ts';
 import type { Translate } from '../i18n.ts';
 import type { Role, RuleChange } from '../lorebase/rules.ts';
 import type { Brain, ConsultEvent } from './brain.ts';
+import { runIdFrom } from '../stack/ids.ts';
 import { type Capacity, type CapResult, StackFeed, StackHub } from '../stack/index.ts';
 import type { Tier } from '../world/types.ts';
 import { AGENT_PATTERNS, cacheParams, type GameConfig, type TierDecision } from './config.ts';
@@ -506,7 +507,7 @@ export function stackHub(host: DecideHost): StackHub {
 }
 
 let runSeq = 0;
-const runIdOf = (e: Pick<RtEntity, 'id'>, cap: string) => `${e.id}:${cap}:${Date.now().toString(36)}${(++runSeq).toString(36)}`;
+const runIdOf = (e: Pick<RtEntity, 'id'>, cap: string) => runIdFrom([e.id, cap], `${Date.now().toString(36)}${(++runSeq).toString(36)}`);
 
 const textMessage = (role: 'system' | 'user', text: string): StackMessage => ({ role, parts: [{ type: 'text', text }] });
 

@@ -31,6 +31,7 @@ import { flatSteps, hasHabit, mockGroupPlan, mockSteps } from './mock.ts';
 import type { PlanStep } from './plan.ts';
 import { inboxBlock, look, memberLine, timeLine } from './prompt.ts';
 import type { RtEntity } from './world.ts';
+import { isSafeRunId, runIdFrom } from '../stack/ids.ts';
 import { blocksOf, committeeData, type Briefing, type CommitteeRun, type GroupRun } from '../stack/members.ts';
 import { memberId, type Roster } from '../stack/topologies.ts';
 
@@ -713,7 +714,7 @@ export class GroupManager {
       },
     });
     const signal = AbortSignal.timeout(decisionTimeoutMs(this.cfg, w));
-    const fresh = () => `${g.id}:${w.day}:${w.minute}:${this.boot}${(this.runSeq++).toString(36)}`;
+    const fresh = () => runIdFrom([g.id, w.day, w.minute], `${this.boot}${(this.runSeq++).toString(36)}`);
     const closers: Array<() => void> = [];
     const open = (id: string) => void closers.push(hub.runs.open(id, run));
     let runId = fresh();
@@ -721,7 +722,10 @@ export class GroupManager {
     try {
       const system = await hub.systemFor(g, people, 'committee', roster);
       const prior = o.prior;
-      if (prior && prior.configHash !== configHash) {
+      if (prior && !isSafeRunId(prior.runId)) {
+        // A run begun under an older id format (reinloop no longer accepts it) cannot be resumed or cancelled: it is lost.
+        console.warn(`[committee ${g.name}] run ${prior.runId} has an id the run store rejects: treated as lost, a new run starts`);
+      } else if (prior && prior.configHash !== configHash) {
         // Another membership or topology cannot replay the old run (its ballots were cast by other seats): it is let go.
         console.warn(`[committee ${g.name}] run ${prior.runId} was begun under another config: abandoned, a new run starts`);
         await this.letGo(system, prior.runId, 'config changed');
@@ -793,7 +797,7 @@ export class GroupManager {
     const roster = this.rosterFor(g, members);
     const situation = this.situation(g, members, why, g.pattern === 'crowd');
     const lead = members[0]!;
-    const sessionId = `${g.id}:${w.day}:${w.minute}:${this.boot}${(this.runSeq++).toString(36)}`;
+    const sessionId = runIdFrom([g.id, w.day, w.minute], `${this.boot}${(this.runSeq++).toString(36)}`);
     const signal = AbortSignal.timeout(decisionTimeoutMs(this.cfg, w));
     const run = this.groupRun(g, members, roster, situation, trace);
     const closeRun = hub.runs.open(sessionId, run);

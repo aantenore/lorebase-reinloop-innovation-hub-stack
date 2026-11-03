@@ -126,14 +126,14 @@ test('stream: events come while the run goes on, the result carries the plan; a 
   try {
     const ps = await hub.stackFor(person('p2', 'haiku'));
     const s = ps.stream('decide', 'go', {
-      sessionId: 'p2:d1', runId: 'p2:decide:fixed', tools: runTools([]),
+      sessionId: 'p2:d1', runId: 'p2.decide.fixed', tools: runTools([]),
       mock: (req) => (req.messages.some((m) => m.role === 'tool') ? { text: 'ok' } : { toolCalls: [{ name: 'commit_plan', args: { reason: 'r', steps: [] } }] }),
     });
     const types: string[] = [];
     for await (const ev of s) types.push(ev.type);
     assert.ok(types.includes('tool.call') && types.at(-1) === 'run.end', types.join(','));
     const res = await s.result;
-    assert.equal(res.run.runId, 'p2:decide:fixed');
+    assert.equal(res.run.runId, 'p2.decide.fixed');
     // the run ended on commit_plan (stop): no answer turn after it
     assert.equal(res.run.output, '');
     assert.equal(res.plan?.summary, 'r');

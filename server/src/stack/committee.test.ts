@@ -164,9 +164,16 @@ test('a run the idea lets go (another config, a lost run) is cancelled first whe
     assert.notEqual(lost.runId, 'gone');
     assert.deepEqual(cancelled.map((c) => [c.id, c.reason]), [['gone', 'run lost']]);
 
+    // A run kept under the old ':' id format is lost: neither resumed nor cancelled, a new run starts.
+    cancelled.length = 0;
+    const old = ok(await manager.resumeReview(g, { ...lost, runId: 'grp:1:2:abc' }, 'brief', mock, reseated, undefined, 'idea-8'));
+    assert.notEqual(old.runId, 'grp:1:2:abc');
+    assert.match(old.runId, /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/);
+    assert.deepEqual(cancelled, []);
+
     // A cancel that throws never stops the new run.
     hub.systemFor = async (...a) => ({ ...(await real(...a)), cancel: async () => { throw new Error('refused'); } }) as never;
-    const again = ok(await manager.resumeReview(g, { ...lost, configHash: 'other' }, 'brief', mock, reseated, undefined, 'idea-8'));
+    const again = ok(await manager.resumeReview(g, { ...old, configHash: 'other' }, 'brief', mock, reseated, undefined, 'idea-8'));
     assert.ok(again.runId);
   } finally {
     hub.systemFor = real;

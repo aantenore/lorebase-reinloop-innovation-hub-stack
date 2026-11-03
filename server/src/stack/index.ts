@@ -17,6 +17,7 @@ import type { RtEntity } from '../rt/world.ts';
 import { DATA_DIR_ENV, gameAgents, loadPersonConfig } from './configs.ts';
 import { feedTelemetry, plexusTelemetry, type PersonRef, type RunEndEvent, type StackFeed } from './feed.ts';
 import { MockScripts, modelAdapters, Transcripts, type MockScript } from './model.ts';
+import { MAX_RUN_ID, runIdFrom } from './ids.ts';
 import { GroupRuns, hubLoader } from './members.ts';
 import { CAPTURE, Scratch, ScratchEntry, toolAdapters, worldToolDefs } from './tools.ts';
 import { topologyFor, type Roster, type SystemKind } from './topologies.ts';
@@ -106,8 +107,6 @@ function guarded(system: System): { system: System; retire(): Promise<void> } {
   };
 }
 
-const MAX_RUN_ID = 128;
-
 /** What identifies a group system: its kind, the people in it and its topology. */
 const systemHash = (kind: SystemKind, members: readonly RtEntity[], def: ReturnType<typeof topologyFor>): string =>
   createHash('sha256').update(JSON.stringify([kind, members.map((m) => m.id), def])).digest('hex').slice(0, 16);
@@ -131,7 +130,7 @@ class Person implements PersonStack {
   }
 
   #runId(cap: Capacity, o: RunOpts): string {
-    const id = o.runId ?? `${this.person.id}:${cap}:${Date.now().toString(36)}${(++this.#seq).toString(36)}`;
+    const id = o.runId ?? runIdFrom([this.person.id, cap], `${Date.now().toString(36)}${(++this.#seq).toString(36)}`);
     if (id.length > MAX_RUN_ID) throw new RangeError(`run id longer than ${MAX_RUN_ID} characters: ${id.slice(0, 40)}...`);
     return id;
   }
