@@ -15,7 +15,8 @@ export interface SimStatus {
   running: boolean;
   tick: number;
   tickMs: number;
-  provider: 'anthropic' | 'mock';
+  /** `mock`, or the provider of the models (`anthropic`, `ollama`, ...). */
+  provider: string;
   model: string;
   lorebase: { connected: boolean; url: string; domain: string; branch: string; revision: string };
 }

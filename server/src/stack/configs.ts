@@ -16,7 +16,7 @@ export const DATA_DIR_ENV = 'HUB_DATA_DIR';
 export interface PersonOptions {
   /** Config file (default `STACK_PERSON_CONFIG` or `config/stacks/person.json`). */
   file?: string;
-  /** Model of this person (replaces the profile's): `anthropic/<id>` or a bare id. */
+  /** Model of this person (replaces the profile's): a reinloop spec (`anthropic/<id>`, `ollama/<model>`, ...) or a bare Anthropic id. */
   model?: string;
   /** Data directory; the telemetry file goes under it. */
   dataDir?: string;

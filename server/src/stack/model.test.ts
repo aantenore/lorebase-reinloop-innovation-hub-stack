@@ -4,7 +4,7 @@ import type { CallContext, ModelDelta, ModelReply, ModelRequest } from '@agent-l
 import { assembleDeltas } from '@agent-layers/core';
 import { costOf, pricingFor, type ModelRef, type ModelRequest as LoopRequest, type ModelResponse, type Provider } from 'reinloop';
 import { StackFeed, type ReasoningEvent, type UsageEvent } from './feed.ts';
-import { EXT, hubAnthropicPort, hubMockPort, MockScripts, tap, ThinkingMemory, toLoopRequest, toolAlias, Transcripts } from './model.ts';
+import { EXT, hubReinloopPort, hubMockPort, MockScripts, tap, ThinkingMemory, toLoopRequest, toolAlias, Transcripts } from './model.ts';
 
 const person = { id: 'a1', name: 'Ilse', model: 'anthropic/claude-sonnet-5-5', tier: 'sonnet' };
 const ctx = (extra: Partial<CallContext> = {}): CallContext => ({ runId: 'r1', agent: 'decide', ...extra });
@@ -48,9 +48,9 @@ test('toolAlias: the model sees plain names while they are unique, the stack get
   assert.equal(toolAlias([{ name: 'a__x' }, { name: 'x' }]).toModel('a__x'), 'a__x');
 });
 
-test('hub-anthropic: provider gets plain tool names, params from ext, system as instructions; reply names are prefixed again', async () => {
+test('hub-reinloop: provider gets plain tool names, params from ext, system as instructions; reply names are prefixed again', async () => {
   const fake = fakeProvider([reply([{ type: 'tool_call', id: 't1', name: 'commit_plan', args: { reason: 'x' } }])]);
-  const port = hubAnthropicPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve });
+  const port = hubReinloopPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve });
   const out = await port.chat(request({
     messages: [{ role: 'system', parts: [{ type: 'text', text: 'be brief' }] }, user('plan')],
     settings: { maxOutputTokens: 300 },
@@ -65,13 +65,13 @@ test('hub-anthropic: provider gets plain tool names, params from ext, system as 
   assert.deepEqual(out.message.parts, [{ type: 'call', id: 't1', tool: 'world__commit_plan', args: { reason: 'x' } }]);
 });
 
-test('hub-anthropic: thinking blocks with their signature come back with the tool results even when the runtime drops them', async () => {
+test('hub-reinloop: thinking blocks with their signature come back with the tool results even when the runtime drops them', async () => {
   const thinking = { type: 'thinking' as const, text: '', signature: 'sig-1' };
   const fake = fakeProvider([
     reply([thinking, { type: 'tool_call', id: 't1', name: 'say', args: { to: 'all', text: 'hi' } }]),
     reply([{ type: 'text', text: 'done' }]),
   ]);
-  const port = hubAnthropicPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve });
+  const port = hubReinloopPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve });
   const first = await port.chat(request(), ctx());
   const withSignature = first.message.parts.find((p) => p.type === 'reasoning') as { ext?: Record<string, unknown> };
   assert.equal(withSignature.ext?.[EXT.signature], 'sig-1');
@@ -89,7 +89,7 @@ test('hub-anthropic: thinking blocks with their signature come back with the too
   assert.equal(result.type === 'tool_result' && result.name, 'say');
 });
 
-test('hub-anthropic stream: text and reasoning are streamed, calls and usage close the stream', async () => {
+test('hub-reinloop stream: text and reasoning are streamed, calls and usage close the stream', async () => {
   const fake = fakeProvider([(_req, g) => {
     g.onThinking?.('hmm');
     g.onText?.('Ciao ');
@@ -98,7 +98,7 @@ test('hub-anthropic stream: text and reasoning are streamed, calls and usage clo
       usage: { inputTokens: 50, outputTokens: 5, cacheReadTokens: 30 },
     });
   }]);
-  const port = hubAnthropicPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve });
+  const port = hubReinloopPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve });
   const deltas: ModelDelta[] = [];
   for await (const d of port.stream!(request(), ctx())) deltas.push(d);
   assert.deepEqual(deltas.filter((d) => d.type === 'text').map((d) => (d as { text: string }).text), ['Ciao ', 'Mara']);
@@ -109,8 +109,8 @@ test('hub-anthropic stream: text and reasoning are streamed, calls and usage clo
   assert.equal(deltas.at(-1)!.type, 'end');
 });
 
-test('hub-anthropic stream: a provider failure reaches the consumer', async () => {
-  const port = hubAnthropicPort({ model: 'claude-sonnet-5-5', resolve: () => ({ provider: { name: 'x', generate: async () => { throw new Error('boom'); } }, model: 'm' }) });
+test('hub-reinloop stream: a provider failure reaches the consumer', async () => {
+  const port = hubReinloopPort({ model: 'claude-sonnet-5-5', resolve: () => ({ provider: { name: 'x', generate: async () => { throw new Error('boom'); } }, model: 'm' }) });
   await assert.rejects(async () => { for await (const _ of port.stream!(request(), ctx())) { /* drain */ } }, /boom/);
 });
 
@@ -187,7 +187,7 @@ test('tap reports usage with cache counts and price, and reasoning, and keeps th
   feed.on('usage', (u) => usages.push(u));
   feed.on('reasoning', (r) => reasons.push(r));
   const transcripts = new Transcripts();
-  const port = tap(hubAnthropicPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve }), person, feed, transcripts);
+  const port = tap(hubReinloopPort({ model: 'claude-sonnet-5-5', resolve: fake.resolve }), person, feed, transcripts);
   await port.chat(request(), ctx());
   assert.equal(usages.length, 1);
   assert.deepEqual(usages[0]!.usage, usage);

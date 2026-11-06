@@ -2,13 +2,15 @@
 import { agent, type EasyAgent, memoryNotes, type MemoryStore, memoryStore, mockProvider, windowCompaction } from 'reinloop';
 import type { RosterEntry, SimConfig } from '../config.ts';
 import type { Translate } from '../i18n.ts';
+import { availability, MOCK_PROVIDER } from '../models.ts';
 import type { Role, Rule } from '../lorebase/rules.ts';
 import type { AgentState } from '../world/types.ts';
 import { type MockHost, mockStep } from './mock.ts';
 import { instructions } from './prompt.ts';
 import { notebookTools, type ToolHost, worldTools } from './tools.ts';
 
-export type ProviderKind = 'anthropic' | 'mock';
+/** Provider of an agent: `mock`, or the provider of its model (`anthropic`, `ollama`, ...). */
+export type ProviderKind = string;
 
 export interface RegisteredAgent {
   id: string;
@@ -58,10 +60,10 @@ export class AgentRegistry {
   }
 
   providerFor(model: string): ProviderKind {
-    // The mock provider is only an offline fallback: --mock / SIM_MOCK=1, or no API key.
-    if (this.cfg.forceMock) return 'mock';
-    if (model.startsWith('anthropic/') && !process.env.ANTHROPIC_API_KEY) return 'mock';
-    return 'anthropic';
+    // The mock provider is only an offline fallback: --mock / SIM_MOCK=1, or a model that cannot run (no API key).
+    if (this.cfg.forceMock) return MOCK_PROVIDER;
+    const a = availability(model);
+    return a.live ? a.provider : MOCK_PROVIDER;
   }
 
   get provider(): ProviderKind {
@@ -78,7 +80,7 @@ export class AgentRegistry {
       name: state.id,
       model: provider === 'mock'
         ? { provider: mockProvider([(req) => ({ ...mockStep(this.mockHost, state.id)(req), delayMs: this.cfg.mock.thinkDelayMs })], { loop: true }), model }
-        // `anthropic/<model>` through reinloop's preset (ANTHROPIC_WORKSPACE_ID becomes the workspace header).
+        // `provider/<model>` through reinloop's presets (for Anthropic, ANTHROPIC_WORKSPACE_ID becomes the workspace header).
         : model,
       params: { maxTokens: a.maxOutputTokens },
       instructions: this.instructionsFor(state),

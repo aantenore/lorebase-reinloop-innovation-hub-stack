@@ -42,6 +42,7 @@ import { committeeScore, type Evidence, EvidenceDesk, evidenceScore, evidenceWei
 import { signalBackend } from './signals.ts';
 import { approvalPhase, type Criterion, criteriaFrom, criteriaTally } from './committee.ts';
 import { dataDirOf, modelRef, personCatalog } from './decide.ts';
+import { chooseMode } from '../models.ts';
 import { type PersonRef, SpanTally, StackFeed, StackHub } from '../stack/index.ts';
 
 type Msg = Record<string, unknown> & { type: string };
@@ -65,6 +66,10 @@ export class Game {
   readonly client: LorebaseClient;
   readonly t: Translate;
   readonly mock: boolean;
+  /** `mock`, or the provider of the models in use (`anthropic`, `ollama`, ...). */
+  readonly provider: string;
+  /** Why the run is offline, when it is (asked for, or a model that cannot run). */
+  readonly mockReason: string | undefined;
   world: RtWorld;
   roster: RosterEntry[] = [];
   private groups: GroupManager;
@@ -170,7 +175,11 @@ export class Game {
     this.cfg = cfg;
     this.game = game;
     this.t = translator(loadTemplates(ROOT, cfg.language));
-    this.mock = cfg.forceMock || !process.env.ANTHROPIC_API_KEY;
+    // Live or mock for the whole run: mock when asked, or when a model the run needs cannot be called (no API key).
+    const mode = chooseMode(cfg);
+    this.mock = mode.mock;
+    this.provider = mode.provider;
+    this.mockReason = mode.reason;
     this.client = new LorebaseClient(cfg.lorebase.url, cfg.lorebase.domain);
     this.limiter = new Limiter(game.decisions.maxConcurrent);
     this.mnemo = new Mnemo(game.memory);
@@ -804,23 +813,25 @@ export class Game {
     return text === key ? code : text;
   }
 
-  /** Connects to Lorebase (retrying until the laws load), populates the world, starts the loop. */
+  /**
+   * Connects to Lorebase (retrying until the laws load), populates the world, starts the loop. `lorebase.maxWaitMs`
+   * (`LOREBASE_MAX_WAIT_MS`, `--lorebase-wait`) bounds the retries; past it the start fails.
+   */
   async init(): Promise<void> {
-    for (;;) {
+    const deadline = this.cfg.lorebase.maxWaitMs > 0 ? Date.now() + this.cfg.lorebase.maxWaitMs : Infinity;
+    await this.retrying('lorebase', deadline, async () => {
       try {
         const snap = await this.watcher.start();
         this.applyRules(snap.rules, snap.roles, snap.revision, [], [], undefined, true);
         console.log(`[lorebase] ${snap.rules.length} rules and ${snap.roles.length} roles @ ${snap.revision.slice(0, 12)}`);
         const missing = missingRtRules(this.values);
         if (missing.length) throw new Error(`rules missing for the real-time world: ${missing.join(', ')} (run: npm run lorebase:seed)`);
-        break;
       } catch (err) {
-        console.error(`[lorebase] ${err instanceof Error ? err.message : err}; retrying in ${this.cfg.lorebase.pollMs} ms`);
         this.watcher.stop();
-        await new Promise((r) => setTimeout(r, this.cfg.lorebase.pollMs));
+        throw err;
       }
-    }
-    if (this.game.economy.enabled) await this.loadEconomy();
+    });
+    if (this.game.economy.enabled) await this.loadEconomy(deadline);
     await this.reconcile();
     if (this.game.ideas.enabled) {
       const out = await this.ideas.reconcile().catch((err) => (console.warn(`[ideas] reconcile skipped: ${err instanceof Error ? err.message : err}`), undefined));
@@ -848,23 +859,39 @@ export class Game {
     }
   }
 
-  /** Loads the economy catalog (retrying until Lorebase has it). */
-  private async loadEconomy(): Promise<void> {
+  /**
+   * Runs `step` until it succeeds, every `lorebase.pollMs`. The first connection failure names the Keeper URL and how
+   * to start it; past `deadline` the last error is thrown with how to wait longer.
+   */
+  private async retrying(label: string, deadline: number, step: () => Promise<void>): Promise<void> {
+    const { url, pollMs, maxWaitMs } = this.cfg.lorebase;
+    let failures = 0;
     for (;;) {
       try {
-        const eco = await this.economy.load();
-        if (!eco.catalog.resources.size) throw new Error('no Resource records (run: npm run lorebase:seed)');
-        this.catalog = eco.catalog;
-        this.discovered = eco.discovered;
-        this.world.catalog = this.catalog;
-        this.world.discovered = this.discovered;
-        console.log(`[economy] ${this.catalog.resources.size} resources, ${this.catalog.recipes.size} recipes, ${this.catalog.techs.size} technologies (${this.discovered.size} discovered)`);
+        await step();
         return;
       } catch (err) {
-        console.error(`[economy] ${err instanceof Error ? err.message : err}; retrying in ${this.cfg.lorebase.pollMs} ms`);
-        await new Promise((r) => setTimeout(r, this.cfg.lorebase.pollMs));
+        const message = err instanceof Error ? err.message : String(err);
+        // fetch rejects with a TypeError when nothing listens at the URL.
+        if (failures++ === 0 && (err instanceof TypeError || /fetch failed|ECONNREFUSED/.test(message))) console.error(`[${label}] ${url} unreachable: start it with npm run lorebase:up`);
+        if (Date.now() + pollMs > deadline) throw new Error(`[${label}] ${url}: ${message} (gave up after ${maxWaitMs} ms; raise lorebase.maxWaitMs or LOREBASE_MAX_WAIT_MS, 0 waits forever)`);
+        console.error(`[${label}] ${message}; retrying in ${pollMs} ms`);
+        await new Promise((r) => setTimeout(r, pollMs));
       }
     }
+  }
+
+  /** Loads the economy catalog (retrying until Lorebase has it, within `deadline`). */
+  private async loadEconomy(deadline = Infinity): Promise<void> {
+    await this.retrying('economy', deadline, async () => {
+      const eco = await this.economy.load();
+      if (!eco.catalog.resources.size) throw new Error('no Resource records (run: npm run lorebase:seed)');
+      this.catalog = eco.catalog;
+      this.discovered = eco.discovered;
+      this.world.catalog = this.catalog;
+      this.world.discovered = this.discovered;
+      console.log(`[economy] ${this.catalog.resources.size} resources, ${this.catalog.recipes.size} recipes, ${this.catalog.techs.size} technologies (${this.discovered.size} discovered)`);
+    });
   }
 
   /** Something a person lived: kept in its short-term memory and sent to its private memory (mnemo). */
@@ -2603,7 +2630,7 @@ export class Game {
   status() {
     return {
       mode: 'realtime',
-      provider: this.mock ? 'mock' : 'anthropic',
+      provider: this.provider,
       model: this.cfg.modelOverride ?? [...new Set(this.world.living().filter((e) => e.kind !== 'player').map((e) => e.model))].join(', '),
       time: this.timeDto(),
       population: this.world.living().length,

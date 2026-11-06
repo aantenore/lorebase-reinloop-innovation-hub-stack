@@ -5,6 +5,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ANTHROPIC_SERVER_TOOL_USD, anthropicWebProvider, costOf, defineTool, hostedTool, type ModelRef, pricingFor, resolveModel, type Tool, type Usage, userMessage, type WebProvider, webTools } from 'reinloop';
 import type { Translate } from '../i18n.ts';
+import { availability } from '../models.ts';
 
 export type ResearchProvider = 'tavily' | 'anthropic-native' | 'off';
 
@@ -223,7 +224,10 @@ export class ResearchDesk {
       const searcher = new AsyncLocalStorage<{ id: string; name: string; tool: ResearchEvent['tool'] }>();
       let provider: 'tavily' | WebProvider = 'tavily';
       if (cfg.provider === 'anthropic-native') {
-        const model = metered(resolveModel(models[cfg.anthropicTier] ?? cfg.anthropicTier), (m, usage) => {
+        const spec = models[cfg.anthropicTier] ?? cfg.anthropicTier;
+        const can = availability(spec);
+        if (!can.live) throw new Error(`the hosted search runs on ${spec}: ${can.reason}`);
+        const model = metered(resolveModel(spec), (m, usage) => {
           const who = searcher.getStore();
           if (who) host.searchUsage?.({ id: who.id, name: who.name }, m, usage, hostedSearchCost(m, usage), who.tool);
         });

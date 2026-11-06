@@ -2,7 +2,7 @@
   "name": "hub-person",
   "layers": {
     "model": {
-      "adapter": "hub-anthropic",
+      "adapter": "hub-reinloop",
       "options": { "model": "anthropic/claude-sonnet-5-5" }
     },
     "runtime": {

@@ -1,7 +1,8 @@
-// Model ports of the hub: `hub-anthropic` (reinloop's Anthropic provider behind the agent-layers ModelPort, so
-// prompt caching, thinking, effort and the workspace header stay as they were) and `hub-mock` (the world-aware offline
-// scripts). Both are wrapped by `tap`, which reports usage and reasoning to the feed and keeps the last conversation of
-// each run for the closing turn.
+// Model ports of the hub: `hub-reinloop` (reinloop's providers behind the agent-layers ModelPort: `anthropic/<id>`
+// with prompt caching, thinking, effort and the workspace header as they were, or any other reinloop spec such as
+// `ollama/<model>` and `openai/<id>`; `hub-anthropic` is the same adapter under its earlier name) and `hub-mock` (the
+// world-aware offline scripts). Both are wrapped by `tap`, which reports usage and reasoning to the feed and keeps the
+// last conversation of each run for the closing turn.
 import {
   assembleDeltas, defineAdapter, messageText, PORT_VERSIONS, replyToDeltas,
   type AnyAdapter, type CallContext, type Message, type ModelDelta, type ModelPort, type ModelReply, type ModelRequest, type Part, type ToolInfo, type Usage,
@@ -10,6 +11,7 @@ import {
   costOf, pricingFor, resolveModel,
   type MockTurn, type ModelParams, type ModelRef, type ModelRequest as LoopRequest, type ModelResponse, type Message as LoopMessage, type Part as LoopPart, type Usage as LoopUsage,
 } from 'reinloop';
+import { modelSpec } from '../models.ts';
 import type { TokenUsage } from '../rt/observatory.ts';
 import type { PersonRef, StackFeed } from './feed.ts';
 
@@ -199,24 +201,26 @@ export function fromLoopResponse(res: ModelResponse, alias: ToolAlias, memory: T
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// hub-anthropic
+// hub-reinloop
 
-export interface AnthropicPortOptions {
-  /** Model used when an agent asks for `default`: `anthropic/<id>` (a bare id gets the `anthropic/` prefix). */
+export interface ReinloopPortOptions {
+  /** Model used when an agent asks for `default`: a reinloop spec, `provider/<model>` (a bare id gets the `anthropic/` prefix). */
   model: string;
   env?: Record<string, string | undefined>;
   /** Resolves a model spec to a provider (reinloop's `resolveModel`; replaced in tests). */
   resolve?: (spec: string, env?: Record<string, string | undefined>) => ModelRef;
 }
 
-const specOf = (model: string) => (model.includes('/') ? model : `anthropic/${model}`);
+/** Name of the generic model adapter, and the earlier name kept for existing person configs. */
+export const REINLOOP_ADAPTER = 'hub-reinloop';
+export const ANTHROPIC_ADAPTER = 'hub-anthropic';
 
-export function hubAnthropicPort(o: AnthropicPortOptions, name = 'hub-anthropic'): ModelPort {
+export function hubReinloopPort(o: ReinloopPortOptions, name = REINLOOP_ADAPTER): ModelPort {
   const memory = new ThinkingMemory();
   const refs = new Map<string, ModelRef>();
   const resolve = o.resolve ?? ((spec, env) => resolveModel(spec, env));
   const refOf = (requested: string): ModelRef => {
-    const spec = specOf(!requested || requested === DEFAULT_MODEL ? o.model : requested);
+    const spec = modelSpec(!requested || requested === DEFAULT_MODEL ? o.model : requested);
     let ref = refs.get(spec);
     if (!ref) refs.set(spec, (ref = resolve(spec, o.env)));
     return ref;
@@ -452,8 +456,8 @@ export interface ModelKit {
   feed: StackFeed;
   scripts: MockScripts;
   transcripts: Transcripts;
-  /** Provider resolution of `hub-anthropic` (tests replace it). */
-  resolve?: AnthropicPortOptions['resolve'];
+  /** Provider resolution of `hub-reinloop` (tests replace it). */
+  resolve?: ReinloopPortOptions['resolve'];
 }
 
 const EXT_DECLARATION = {
@@ -465,15 +469,17 @@ export function modelAdapters(kit: ModelKit): AnyAdapter[] {
   const common = {
     layer: 'llm', port: 'ModelPort', direction: 'outbound', portVersion: PORT_VERSIONS.ModelPort, tiers: ['prototype', 'production'], ext: EXT_DECLARATION,
   } as const;
+  const reinloop = (name: string, description: string) => defineAdapter<'ModelPort', { model: string }>({
+    ...common,
+    name,
+    maps: { technology: 'reinloop model providers (Anthropic Messages API, OpenAI-compatible servers such as Ollama)' },
+    description,
+    optionsSchema: { type: 'object', required: ['model'], properties: { model: { type: 'string', minLength: 1 } }, additionalProperties: false },
+    create: (options, ctx) => tap(hubReinloopPort({ model: options.model, env: ctx.env, ...(kit.resolve ? { resolve: kit.resolve } : {}) }, ctx.name), kit.person, kit.feed, kit.transcripts),
+  });
   return [
-    defineAdapter<'ModelPort', { model: string }>({
-      ...common,
-      name: 'hub-anthropic',
-      maps: { technology: 'Anthropic Messages API (reinloop provider)' },
-      description: 'Anthropic through reinloop\'s provider: prompt caching, thinking, effort and the workspace header; usage and reasoning go to the stack feed.',
-      optionsSchema: { type: 'object', required: ['model'], properties: { model: { type: 'string', minLength: 1 } }, additionalProperties: false },
-      create: (options, ctx) => tap(hubAnthropicPort({ model: options.model, env: ctx.env, ...(kit.resolve ? { resolve: kit.resolve } : {}) }, ctx.name), kit.person, kit.feed, kit.transcripts),
-    }),
+    reinloop(REINLOOP_ADAPTER, 'Any reinloop model spec (anthropic/<id>, ollama/<model>, openai/<id>, ...) through its provider; on Anthropic prompt caching, thinking, effort and the workspace header; usage and reasoning go to the stack feed.'),
+    reinloop(ANTHROPIC_ADAPTER, `The same as ${REINLOOP_ADAPTER}, under the name earlier person configs use.`),
     defineAdapter<'ModelPort', { model?: string }>({
       ...common,
       name: 'hub-mock',

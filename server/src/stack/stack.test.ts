@@ -190,9 +190,12 @@ test('telemetry of the stacks goes to the data directory', async () => {
 
 test('loadPersonConfig: profile model, own model, offline model, agent overlay as a function or a map', async () => {
   const live = await loadPersonConfig('haiku', false, { dataDir });
-  assert.deepEqual(live.layers.model, { adapter: 'hub-anthropic', options: { model: 'anthropic/claude-haiku-5-5' } });
+  assert.deepEqual(live.layers.model, { adapter: 'hub-reinloop', options: { model: 'anthropic/claude-haiku-5-5' } });
   const own = await loadPersonConfig('opus', false, { dataDir, model: 'anthropic/claude-x', agents: { reply: { settings: { maxOutputTokens: 7 } } } });
   assert.equal((own.layers.model as { options: { model: string } }).options.model, 'anthropic/claude-x');
+  // Any reinloop spec goes through the same adapter (SIM_MODEL_OVERRIDE=ollama/<model> runs on a local server).
+  const local = await loadPersonConfig('haiku', false, { dataDir, model: 'ollama/qwen3:4b' });
+  assert.deepEqual(local.layers.model, { adapter: 'hub-reinloop', options: { model: 'ollama/qwen3:4b' } });
   assert.equal(own.agents.reply!.settings?.maxOutputTokens, 7);
   assert.equal(own.agents.reply!.model, 'default');
   const mock = await loadPersonConfig('sonnet', true, { dataDir, model: 'anthropic/claude-x', agents: (a) => ({ decide: { instructions: `${Object.keys(a).length} agents` } }) });

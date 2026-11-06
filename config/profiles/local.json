@@ -1,0 +1,57 @@
+{
+  "description": "Local models through SIM_MODEL_OVERRIDE=ollama/<model> (or lmstudio/, vllm/): one decision at a time, long time limits, a large output limit (a thinking model's reasoning counts toward it), fewer turns and consultations, no hosted web research, no interns; game clock x3 so people are not idle while a small model thinks.",
+  "rosterTiers": {
+    "*": "haiku"
+  },
+  "game": {
+    "decisions": {
+      "maxConcurrent": 1,
+      "timeoutMinMs": 300000,
+      "timeoutMs": 600000,
+      "tiers": {
+        "haiku": {
+          "maxSteps": 35,
+          "horizonFactor": 1,
+          "cooldownFactor": 2,
+          "maxTurns": 4,
+          "maxOutputTokens": 8000,
+          "maxConsults": 1,
+          "maxWebCalls": 0
+        }
+      },
+      "modelParams": {
+        "reply": {
+          "retryMaxTokens": 800
+        },
+        "prose": {
+          "retryMaxTokens": 800
+        }
+      }
+    },
+    "conversation": {
+      "replyMaxOutputTokens": 2000,
+      "replyTimeoutMs": 300000,
+      "replyMaxTurns": 2
+    },
+    "groups": {
+      "memberTier": "haiku",
+      "maxProposers": 2,
+      "maxTurns": 2,
+      "proseMaxOutputTokens": 3000
+    },
+    "crowd": {
+      "count": 0
+    },
+    "evidence": {
+      "interview": {
+        "timeoutMs": 300000
+      }
+    },
+    "research": {
+      "provider": "off"
+    },
+    "loop": {
+      "timeScale": 3
+    }
+  }
+}
