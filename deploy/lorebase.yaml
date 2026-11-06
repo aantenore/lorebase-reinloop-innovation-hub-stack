@@ -1,0 +1,1462 @@
+# Copy of config/lorebase.example.yaml at lorebase v0.3.1 (scripts/lorebase-up.sh sync): do not edit; change LOREBASE_VERSION and run sync.
+# Lorebase example configuration.
+#
+# Point LOREBASE_CONFIG at a copy of this file. Precedence, lowest to highest:
+#   code defaults < this file < environment variables LOREBASE__SECTION__KEY
+# (nested keys use more double underscores: LOREBASE__INFERENCE__LLM__BASE_URL).
+#
+# The values below are the defaults compiled into the code; every key is optional.
+# Secret settings accept a literal, `secret://env/NAME` (environment variable) or
+# `secret://file//absolute/path` (file content).
+
+logging:
+  level: INFO                    # CRITICAL | ERROR | WARNING | INFO | DEBUG
+  format: json                   # json | text
+  redact_keys:                   # field names whose values are masked in every log record
+    - password
+    - secret
+    - token
+    - api_key
+    - authorization
+    - credential
+  redact_min_length: 4           # shorter secret values are not masked inside free text
+
+telemetry:
+  otlp_endpoint: null            # e.g. http://otel-collector:4317; unset disables telemetry
+  service_name: lorebase
+  service_namespace: lorebase
+  sample_ratio: 0.1              # fraction of root traces sampled, 0 to 1
+  metric_export_interval_s: 60
+
+# Keeper, the REST API service. Environment: LOREBASE__KEEPER__PORT, LOREBASE__KEEPER__HOST, ...
+keeper:
+  host: 127.0.0.1                # bind address; containers set 0.0.0.0
+  port: 8080
+  api_prefix: /api/v1            # version prefix of every API route; OpenAPI at <prefix>/openapi.json
+  request_id_header: X-Request-ID          # accepted from clients when well formed, echoed back
+  problem_type_base: "urn:lorebase:problem:"   # error `type` URI = this prefix + error code
+  trusted_proxies: []            # networks of reverse proxies in front of Keeper, e.g. [10.0.0.0/8].
+                                 # Only from these peers is X-Forwarded-For read (right to left,
+                                 # trusted hops skipped) to find the client address used by API
+                                 # key allowlists; empty: the socket peer is the client
+  security_headers:
+    enabled: true                # master switch for the response headers below
+    hsts:
+      enabled: auto              # Strict-Transport-Security: auto (only when the request came over https,
+                                 # directly or from a trusted proxy sending X-Forwarded-Proto: https), always, never
+      max_age_s: 31536000
+      include_subdomains: true
+      preload: false             # needs include_subdomains and max_age_s >= 31536000
+    frame_options: DENY          # X-Frame-Options and CSP frame-ancestors: DENY, SAMEORIGIN or off
+    referrer_policy: no-referrer # Referrer-Policy; empty: not sent
+    content_type_nosniff: true   # X-Content-Type-Options: nosniff
+  cors:
+    allow_origins: []            # browser origins allowed to call the API; empty disables CORS
+    allow_methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+    allow_headers: []            # further request headers; Authorization, Content-Type,
+                                 # Idempotency-Key, If-None-Match, the request id, CSRF and
+                                 # trace headers are always allowed
+    expose_headers: [ETag, Lorebase-Revision]  # readable by scripts (always: these, the request
+                                               # id and the rate limit headers)
+    allow_credentials: false     # cannot be combined with the "*" origin
+    max_age_s: 600
+  limits:
+    max_request_body_bytes: 1048576   # larger bodies are rejected with 413
+    rate:                        # token buckets per principal (API key id or user) and request
+                                 # class; refusals are 429 with Retry-After, every response of a
+                                 # limited route carries RateLimit-Limit/-Remaining/-Reset
+      enabled: true
+      backend: local             # local (alias memory): per process, N Keepers allow N times the
+                                 # limits; postgres: buckets shared by every Keeper (use it with
+                                 # more than one; compose scale-out and Helm with replicas > 1)
+      postgres:                  # the shared backend: UNLOGGED table rate_limit_buckets
+        lease_tokens: 10         # tokens taken per query and served from memory (at most a
+                                 # quarter of a bucket); unused ones expire, never overspent
+        lease_ttl_s: 2.0         # leased tokens not used in this time are dropped
+        timeout_s: 0.25          # budget of one query; slower counts as a failure
+        on_error: local          # database down or slow: local (limits in this process),
+                                 # allow or deny; failed-authentication buckets always deny
+        error_retry_after_s: 1   # Retry-After of a refusal caused by the database
+        check_cache_s: 0.5       # reuse of a failed-authentication bucket reading by the check
+                                 # before each authentication (failures are written at once)
+        auth_failures_timeout_s: 1.0   # budget of a failed-authentication query; then 429
+        stale_reading_s: 30.0    # during an outage a reading this recent still decides, so
+                                 # only clients without one are refused
+        prune_interval_s: 60.0   # deletion of rows of buckets that are full again
+        prune_batch: 1000
+      max_buckets: 100000        # buckets kept in memory; least recently used are dropped
+      exempt_paths: [/healthz, /readyz]   # route paths without the API prefix, never limited
+      reads:                     # GETs, query, traverse, neighborhood
+        requests_per_minute: 1200   # sustained rate
+        burst: 200               # requests allowed back to back
+      writes:                    # every other POST, PUT, PATCH and DELETE
+        requests_per_minute: 300
+        burst: 60
+      searches:                  # POST .../search
+        requests_per_minute: 300
+        burst: 60
+      context:                   # POST .../context (context packs)
+        requests_per_minute: 120
+        burst: 30
+      admin:                     # routes tagged `admin`: keys, principals, grants, audit
+        requests_per_minute: 120
+        burst: 30
+      auth_failures:             # 401s to requests carrying a credential, per client address
+        requests_per_minute: 30  # and per API key prefix; when either is spent, requests are
+        burst: 30                # answered 429 before the credential is checked
+        ipv6_prefix_length: 64   # IPv6 clients are counted by network of this length
+        per_key_prefix_enabled: true  # false: count by address only (key prefixes are not
+                                 # secret, so with a bucket per prefix whoever knows one can keep
+                                 # that key throttled); the per-address bucket is always on
+      domains: {}                # per-Domain buckets by Domain id, any of the classes above, e.g.
+                                 #   supply: {writes: {requests_per_minute: 60, burst: 10}}
+      routes:                    # how requests are sorted into classes
+        admin_tags: [admin]
+        search_suffixes: [/search]
+        context_suffixes: [/context]
+        read_post_suffixes: [/query, /traverse, /neighborhood]
+      throttle_audit:            # audit entry `rate_limit.throttled` for a principal that keeps
+        threshold: 20            # being refused: this many refusals within window_s; 0 disables
+        window_s: 300
+        max_tracked: 10000
+    quota:                       # daily quotas per API key, in UTC days (users have none);
+                                 # exceeded: 429 `quota-exceeded` with Retry-After to the reset.
+                                 # Usage is stored in api_key_usage and shown by GET /auth/whoami
+      enabled: true
+      requests_per_day: 100000   # null: unlimited
+      context_tokens_per_day: 2000000   # estimated tokens of context packs; null: unlimited
+      flush_interval_s: 5        # a process writes its counted use this often
+      keys: {}                   # per API key id, e.g. key_01...: {requests_per_day: null}
+  pagination:
+    default_limit: 50
+    max_limit: 500
+  reads:
+    reachability_max_depth: 1000 # parent hops followed to prove that a Revision or tag named by
+                                 # a caller with branch-scoped grants is reachable from a branch
+                                 # the caller may read; further back: 403
+    cache:                       # in-process cache of GET read responses, keyed by Revision:
+      enabled: true              # commits move branches to new Revisions, so no invalidation
+      max_entries: 1024
+      max_bytes: 33554432        # 32 MiB of response bodies
+      ttl_s: 300
+      max_body_bytes: 1048576    # larger responses are not cached
+      time_travel_max_entries: 128   # entries for reads at another Revision; 0 never caches them
+    sensitivity:                 # values of pii / confidential / restricted Attributes, shown only
+                                 # with pii.read / confidential.read / restricted.read
+      omit: false                # true: leave masked values out of Records
+      masked_value: "***"        # what masked values read as
+      erased_value: "[erased]"   # what erased vault values read as (cleared callers)
+    prefer_replica: false        # true: read endpoints use the replicas of database.read_dsn
+                                 # when one is fresh enough (see docs/deployment.md)
+  readiness:
+    timeout_s: 2                 # time budget of each /readyz check
+    database_section: database   # settings section with the connection string; if absent the
+    database_dsn_key: dsn        # database check reports not_configured
+  auth:
+    mode: none                   # none | api_key | oidc | api_key+oidc. `none` accepts every
+                                 # request as an administrator: local development only. The
+                                 # other modes need the `database` section below
+    allow_insecure: false        # true: allow mode `none` with a host other than loopback;
+                                 # otherwise Keeper refuses to start with that combination
+    installation_admins: []      # principal ids, identity provider subjects or group ids allowed
+                                 # to administer the installation (list principals). They get
+                                 # no access to Domain data
+    api_keys:                    # agents and automation: Authorization: Bearer lbk_... or X-Api-Key
+      token_prefix: lbk          # keys look like <token_prefix>_<prefix>_<secret>
+      header: X-Api-Key          # header accepted besides Authorization: Bearer
+      pepper: null               # REQUIRED with api_key modes: >= 32 characters, e.g.
+                                 # secret://env/LOREBASE_API_KEY_PEPPER. Changing it invalidates
+                                 # every issued key
+      prefix_length: 10          # characters of the public lookup prefix
+      secret_bytes: 32           # random bytes of the secret part
+      default_ttl_days: 365      # lifetime of new keys; null: no expiry
+      max_ttl_days: null         # longest lifetime an admin may request; null: no limit
+      last_used_interval_s: 60   # a key's last-used time is written at most this often
+      max_allowed_networks: 32   # most client networks a key's allowed_networks may list
+    oidc:                        # bearer tokens of any OpenID Connect provider
+      issuer: null               # REQUIRED with oidc modes: expected `iss`, base of discovery
+      audience: []               # REQUIRED with oidc modes: accepted `aud` values
+      jwks_uri: null             # null: read from <issuer>/.well-known/openid-configuration
+      algorithms: [RS256, ES256] # asymmetric algorithms only
+      clock_skew_s: 60           # tolerance for exp, nbf and iat
+      jwks_cache_ttl_s: 300      # signing keys are refreshed after this long
+      jwks_min_refresh_s: 30     # shortest time between key refreshes (unknown key id, errors)
+      http_timeout_s: 5          # timeout of provider requests
+      subject_claim: sub
+      name_claims: [name, preferred_username, email]   # display name, in order of preference
+      groups_claim: groups       # claim with provider group names (matched to groups)
+      auto_provision: true       # create the user on the first valid token
+      principal_cache_ttl_s: 60  # reuse of a subject's principal and groups
+      principal_cache_max_entries: 4096
+      allow_insecure: false      # true: accept http issuer and jwks_uri (configured or
+                                 # discovered) off loopback; https is required otherwise
+    authz:
+      grants_cache_ttl_s: 15     # grants are cached this long; other processes see changes after
+                                 # at most this; 0 disables
+      grants_cache_max_entries: 2048
+      invisible_kinds: true      # Kinds a caller's Kind-narrowed grants leave out are invisible to
+                                 # it: the schema it reads omits them and what tells about them,
+                                 # and naming them answers like an unknown name (404/422, never
+                                 # 403); false refuses them with 403 naming the Kind
+      custom_roles: {}           # extra roles, name -> permissions. Built-in roles: viewer,
+                                 # explorer, editor, operator, modeler, reviewer, maintainer,
+                                 # admin, agent-reader. Example:
+                                 #   contributor: [schema.read, data.read, branch.create]
+                                 # Permissions: schema.read data.read views.write branch.create
+                                 # operation.execute operation.execute_custom schema.write
+                                 # source.map proposal.review conflict.resolve proposal.merge
+                                 # source.manage job.manage grant.manage apikey.manage
+                                 # domain.settings domain.delete audit.read trace.read
+                                 # trace.explain principal.read domain.create (the last two are
+                                 # installation-level)
+    audit:
+      enabled: true              # hash-chained log of mutations and denied requests; needs the
+                                 # `database` section
+      record_denied: true        # also record requests rejected with 401 or 403
+      write_timeout_s: 2         # a failed or slow write is logged and counted, never surfaced
+      reads:                     # records of successful reads, in audit_read_log (hash chains
+                                 # of their own), written in batches off the request path
+        enabled: false
+        sample_rate: 1.0         # share of the reads passing the filters that are recorded
+        principal_types: []      # user, service, api_key; empty: every type
+        kinds: []                # Kind api names in the route; empty: every read
+                                 # reads that showed or masked a sensitive value are always
+                                 # recorded, whatever the sampling and the filters
+        queue_size: 10000        # past it records are dropped (lorebase.audit.reads.dropped)
+        batch_size: 500          # records per transaction
+        flush_interval_s: 1.0    # longest wait before queued records are written
+        write_timeout_s: 5.0     # a failed batch is dropped and counted (on_overflow: drop)
+        on_overflow: drop        # drop: serve the read, drop and count the record; reject:
+                                 # 503 when the record finds no place in the queue, failed
+                                 # batches kept and retried (the read stream as proof)
+        retry_after_s: 1         # Retry-After of reads refused by on_overflow: reject
+        unready_after_failures: 3  # failed attempts in a row of a batch before readiness
+                                 # fails (on_overflow: reject)
+    sessions:                 # sign-in of the web app: Keeper as backend-for-frontend
+                                 # (authorization code + PKCE, server-side sessions). Needs an
+                                 # oidc mode and the `database` section
+      enabled: false
+      discovery_url: null        # null: <oidc.issuer>/.well-known/openid-configuration
+      client_id: null            # REQUIRED when enabled
+      client_secret: null        # e.g. secret://env/LOREBASE_OIDC_CLIENT_SECRET; not needed with
+                                 # token_endpoint_auth_method: none (public client, PKCE only)
+      token_endpoint_auth_method: client_secret_basic   # | client_secret_post | none
+      scopes: [openid, profile, email]   # add offline_access if the provider needs it for
+                                         # refresh tokens
+      redirect_uri: null         # REQUIRED: public URL of <api_prefix>/auth/callback, registered
+                                 # at the provider and sent unchanged (exact match)
+      app_url: null              # REQUIRED: public URL of the web app; sign-in returns to a path
+                                 # on its origin
+      post_logout_redirect_uri: null   # after sign-out at the provider; null: app_url
+      error_path: /login         # app path receiving failed sign-ins as ?error=<code>
+      encryption_key: null       # REQUIRED: >= 32 characters, e.g.
+                                 # secret://env/LOREBASE_SESSION_KEY;
+                                 # encrypts the sign-in state cookie and stored provider tokens
+      cookie_name: lorebase_session      # sent as __Host-<name> with cookie_secure
+      login_cookie_name: lorebase_login  # short-lived sign-in state cookie
+      cookie_secure: true        # Secure + __Host- prefix; false only for http on loopback
+      same_site: lax             # lax | strict (session cookie)
+      login_timeout_s: 600       # time allowed to finish a sign-in
+      idle_timeout_s: 3600       # a session unused this long ends
+      absolute_timeout_s: 43200  # a session ends this long after sign-in
+      touch_interval_s: 60       # last activity written at most this often
+      refresh_tokens: true       # refresh at the provider when the access token expires; a
+                                 # refusal ends the session, new group claims apply
+      refresh_default_interval_s: 300   # when the token response has no expires_in
+      refresh_min_interval_s: 60
+      refresh_lease_s: 30        # one refresh per session at a time; retry delay after errors
+      metadata_cache_ttl_s: 3600
+      csrf_header: X-CSRF-Token  # CSRF token header on POST, PUT, PATCH, DELETE
+      allowed_origins: []        # Origin values accepted besides app_url's and redirect_uri's
+      purge_batch: 100           # expired sessions deleted at each sign-in
+  openapi:
+    title: Lorebase Keeper
+    docs_enabled: true           # serve <prefix>/docs and <prefix>/openapi.json
+  domains:
+    leaf_size: 512               # tree leaf size of new Domains, fixed for a Domain's life
+    creator_role: admin          # role granted to the creator in a new Domain; null: none
+    protect_default_branch: true # the default branch accepts changes only through Proposals
+  branches:
+    materialization: full        # the only value: a copy holds full rows, copied from the
+                                 # source head or rebuilt from the tree of the start Revision;
+                                 # copy or overlay per branch: store.materialize.branch_mode
+    max_materialized_per_domain: 20
+    name_pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+    max_name_length: 200
+    lock_retry_after_s: 1        # Retry-After of 503 branch-busy answers
+  schema_changes:
+    max_issues: 200              # issues listed in one response
+    max_listed_changes: 1000     # element changes listed in one response
+  schema_inference:              # POST /domains/{d}/schema:infer (docs/inference.md)
+    max_files: 50                # files per request
+    max_file_bytes: 1048576      # per file (413 above); uploads also obey limits.max_request_body_bytes
+    max_total_bytes: 1048576     # all files together (413 above)
+    file_suffixes: [.csv, .tsv, .txt, .json, .jsonl, .ndjson, .parquet]
+    file_formats: {.json: json, .jsonl: jsonl, .ndjson: jsonl, .parquet: parquet}   # how a
+                                 # suffix is read: json (array of objects), jsonl (one object
+                                 # per line), parquet (needs lorebase-keeper[parquet]); other
+                                 # accepted suffixes are CSV/TSV text
+    allowed_sources: []          # secret references of Postgres URLs callers may name, e.g.
+                                 # secret://env/ERP_DSN; empty disables Postgres inference;
+                                 # the default of every Domain not in domain_sources
+    domain_sources: {}           # per-Domain lists replacing allowed_sources for that Domain,
+                                 # e.g. {supply: [secret://env/ERP_DSN], hr: []}; [] = none
+    allowed_schemas: {}          # MySQL / SQL Server sources: schemas a source may be profiled
+                                 # in, e.g. {"secret://env/ERP_DSN": [dbo]}; unlisted = any
+    preview_rows: 20             # rows of a schema:preview when the request names none
+    preview_max_rows: 200        # most rows a preview may ask for
+    preview_max_cell_chars: 1000 # longest text returned per value of a preview
+    max_issues: 500              # issues listed in one response
+    options:                     # thresholds and naming rules; a request may override them
+      sample_size: 10000         # values read per column
+      null_tokens: ["", "NULL", "null"]   # text read as null (after trimming)
+      trim_text: true
+      max_evidence_samples: 5    # sample values kept per evidence entry
+      min_support_values: 20     # non-null values for full confidence; fewer scale it down
+      sampled_uniqueness_factor: 0.8   # confidence factor when only a sample was read
+      true_tokens: ["true", "t", "yes", "y"]     # boolean tokens, case-insensitive
+      false_tokens: ["false", "f", "no", "n"]
+      type_tolerance: 0.0        # share of values allowed not to parse as the detected type
+      mixed_type_report_ratio: 0.5     # report text columns that mostly parse as one type
+      leading_zero_integers_as_text: true   # 007 stays a text code
+      decimal_max_scale: 4       # more fractional digits: float
+      decimal_precision_headroom: 2    # integer digits added to the largest seen
+      decimal_max_precision: 38
+      date_formats: ["%Y-%m-%d"]
+      timestamp_formats: ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"]   # without offset: UTC;
+                                 # RFC 3339 with offset is always recognized
+      enum_max_cardinality: 12   # enum: at most this many distinct values,
+      enum_max_distinct_ratio: 0.5     # at most this distinct/non-null ratio,
+      enum_min_values: 10        # at least this many non-null values,
+      enum_max_value_length: 40  # and short values (numbered codes such as a-1, a-2 never)
+      text_min_length: 256       # longer values: text
+      text_name_hints: [description, "*_description", summary, reason, notes, note, comment,
+                        comments, body, content, details]   # prose under these names: text
+      text_hint_min_words: 3.0
+      string_length_buckets: [16, 32, 64, 128, 256]   # max_length rounded up to a bucket
+      propose_max_length: true
+      propose_patterns: true     # e.g. ^S-[0-9]{4,}$ for code-like values
+      pattern_min_values: 5
+      propose_non_negative_min: true   # min 0 on numbers that are never negative
+      required_max_null_ratio: 0.0     # at most this share of nulls: required
+      unique_min_values: 2
+      unique_name_patterns: ["*_number", "*_code", "*_id", "*_key", email, "*_email", "vat*",
+                             iban]   # unique non-key columns flagged unique only when named so
+      key_name_patterns: [id, key, code, "{table}_id", "{table}_key", "{table}_code",
+                          "{table}_number", "{table}_no", "*_id", "*_key", "*_code",
+                          "*_number", "*_no"]   # ranked primary key names
+      allow_unnamed_primary_key: true    # else the first unique, never-null column
+      composite_key_max_columns: 2
+      minted_key_columns: [key]  # key column of generated ids (ULID, UUID): minted keys
+      min_inclusion_ratio: 0.95  # share of a column's values found in a key for a Relation
+      foreign_key_suffixes: [_id, _key, _code, _number, _no, _ref, _fk]
+      integer_reference_needs_name: true
+      weak_name_factor: 0.9      # confidence factor: reference suffix without the target name
+      no_name_factor: 0.75       # confidence factor: no name hint at all
+      detect_junction_tables: true     # two references forming the key: a Relation
+      junction_max_attributes: 8
+      one_to_one_needs_declared_unique: true
+      singular_kind_names: true  # suppliers -> Supplier
+      strip_table_prefixes: []   # e.g. [tbl_]
+      title_names: [name, title, label, display_name, "*_name", "*_title", "*_label"]
+      propose_search: true       # title searchable (A), text Attributes searchable (B)
+      reserved_attribute_names: [key, kind, ref, revision]   # renamed <kind>_<column>
+      element_status: draft      # status of proposed Kinds and Relations
+      id_seed: lorebase.infer    # same input and seed: same ids
+      id_timestamp_ms: 0
+  schema_suggestions:            # GET /domains/{d}/schema/suggestions and :decide; thresholds
+                                 # in schema.suggestions (docs/extraction.md)
+    branch_prefix: schema-suggestions/   # accepted suggestions are applied on <prefix><id>
+    max_decisions: 100           # suggestions one request may decide
+  operations:
+    max_bulk_rows: 10000         # rows accepted by one import_records or import_links call
+    import_batch_rows: 1000      # rows committed per Revision by bulk imports
+    max_bulk_delete_keys: 1000   # keys accepted by one delete_records call (one Revision)
+    dry_run_max_edits: 1000      # edits listed in a response; longer lists are cut
+    max_issues: 200              # violations listed in one response
+    side_effect_max_edits: 100   # edits listed in an Operation side effect event; longer lists are cut
+    direct_commit_on_protected: false   # true: Operations with review policy `never` commit
+                                        # directly to protected branches
+    skip_expression_preconditions: false   # with expressions off: true skips CEL
+                                           # preconditions (reported) instead of refusing
+    expressions_enabled: true    # stored Operations evaluate CEL preconditions, review
+                                 # policies and steps (lorebase_core.expr: sandboxed, no I/O,
+                                 # deterministic, bounded below); false: refused. Whether
+                                 # schemas may hold CEL is schema.expressions_enabled
+    expression_limits:           # budget of one Operation expression (ExprLimits)
+      max_source_length: 4096    # characters of expression source
+      max_depth: 48              # nesting depth of the expression tree
+      max_steps: 10000           # evaluation steps, comprehension iterations included
+      max_duration_ms: 250       # wall-clock safety net behind max_steps
+      max_list_size: 10000       # elements of a list or map built during evaluation
+      max_string_length: 65536   # characters of a string built during evaluation
+      max_record_lookups: 100    # Records and link lists read through record(), links()
+      decimal_precision: 34      # significant digits of decimal arithmetic
+  proposals:                     # a Domain overrides required_approvals,
+                                 # required_approvals_from_stewards and required_roles
+                                 # with its own settings of those names; its `merge_policy` setting holds the merge
+                                 # policy options of new Proposals
+    required_approvals: 1        # approvals needed to merge into a protected branch
+    required_approvals_from_stewards: 0  # of those, approvals from the Proposal's assignees
+                                 # (stewards, design 10.7); the larger of the two is needed
+    required_roles: []           # roles that must each have approved (one approval from a holder
+                                 # who may review the Proposal); also a Domain setting
+    allow_self_approval: false   # authors may approve their own Proposals into protected branches
+    changes_requested_blocks: true   # an outstanding request_changes review blocks such merges
+    auto_close_source_branch: false  # delete the source branch after the merge (never the
+                                     # default or a protected branch)
+    attempt_retention: 5         # merge attempts kept per Proposal (merged ones always kept)
+    preview_on_create: true      # compute the merge preview (Conflict count) on creation
+    max_resolutions: 1000        # resolutions accepted by one bulk request
+    max_item_decisions: 5000     # extraction items one items:decide request may decide
+  agent_writes:                  # Operations that need review, written by agents (docs/agents.md)
+                                 # A request that names a `task` runs on the branch
+                                 # {branch_prefix}/{principal}/{task} and opens or updates a
+                                 # Proposal instead of answering 409 review-required. A Domain
+                                 # overrides any member with its own `agent_writes` setting.
+    enabled: true                # false: review-required stays a plain 409
+    principal_types: [service]   # principal types that are agents (user, service, api_key); the
+                                 # others must send auto_propose: true
+    auto_propose: true           # default of agents when a request leaves auto_propose out
+    auto_merge: false            # default when a request leaves auto_merge out
+    allowed_roles_for_auto_merge: []   # roles whose agents may be merged automatically (the
+                                       # role is granted in the Domain and covers the branch);
+                                       # empty: nobody. Required approvals are never skipped
+    max_open_branches_per_principal: 10   # task branches one principal may hold at a time
+    branch_prefix: agent         # first part of task branch names
+    branch_mode: overlay         # task branches: overlay (only the rows the task changes, reads
+                                 # the target as of the fork) or copy (full rows)
+    delete_branch_on_merge: true # delete the task branch when its Proposal merged or closed
+                                 # (not while another open Proposal uses it)
+    max_task_length: 60          # longest task slug (after normalization)
+    title_template: "Agent {principal}: {task}"   # title of the Proposal
+    summary_parameter_values: true   # list parameter values in the Proposal description;
+                                     # false: names only (values may be sensitive)
+    summary_value_chars: 80      # characters of a parameter value kept in the description
+    max_summary_operations: 20   # executions listed in one Proposal description
+  reconciliation:                # reconciliation queue endpoints (design 10.6); detection is
+                                 # set in scribe.reconciliation
+    default_limit: 50            # candidates listed per page
+    max_limit: 500               # largest page a request may ask for
+    bulk_max: 1000               # candidates one bulk resolution may decide
+    merge_check: warn            # Proposal check of open candidates: off, warn (listed) or block
+                                 # (open contradictions stop the merge); the stricter of this and
+                                 # the Domain reconciliation_check applies (off < warn < block)
+  documents:                     # document intake for extraction (docs/extraction.md)
+    max_bytes: 20971520          # largest document (20 MiB); the upload route allows this much
+    multipart_overhead_bytes: 65536  # plus this, whatever limits.max_request_body_bytes says
+    media_types:                 # accepted file name suffixes and their stored media type
+      .md: text/markdown
+      .markdown: text/markdown
+      .txt: text/plain
+      .pdf: application/pdf
+      .docx: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    url_hosts: []                # hosts documents may be fetched from (exact); empty: no URLs
+    url_schemes: [https]
+    url_allow_private_targets: false  # true: skip the global-address check and the pinning
+    url_timeout_s: 30.0          # time budget of one fetch (redirects are not followed)
+    extract_on_upload: true      # queue an extraction job per upload unless the request says no
+    jobs_listed: 20              # extraction jobs shown with a document
+    max_text_chars: 2000000      # parsed text served by GET .../documents/{id}/text (cut above)
+    max_source_key_chars: 1024   # longest source_key of an upload (new bytes: a new version)
+  stewards:                      # who looks after which part of a Domain (design 10.7); the
+                                 # roles come from the schema, assignees from grants
+    max_assignees_listed: 50     # assignees shown per Proposal or candidate (principal.read)
+    max_grants_scanned: 10000    # grants of a Domain read to find assignees
+  trace:                         # agent trace (docs/agent-trace.md): steps of agent sessions
+                                 # (query, counts, refs, latency; never values), written off the
+                                 # request path to agent_trace_steps. Needs the `database` section
+    enabled: false
+    session_header: X-Lorebase-Session   # names the session; without it a traced request joins an
+                                 # inferred session (malformed: not traced)
+    tool_header: X-Lorebase-Tool # agent tool (MCP tool name) that made the request
+    opt_in_header: X-Lorebase-Trace   # per request opt-in: `on`, or `debug` for query plans
+                                 # (callers holding trace.explain)
+    allow_header_opt_in: true
+    trace_all: false             # trace every authenticated request, except the web app's own
+    client_header: X-Lorebase-Client   # names the client of a request; the web app sends web_client
+    web_client: web              # client_header value of the web app's requests
+    include_web: false           # true: trace_all also traces the web app (requests marked with
+                                 # client_header, and browser session cookie requests that name
+                                 # no session)
+    principals: []               # principal ids whose requests are traced
+    api_keys: []                 # API key ids whose requests are traced
+    inferred_session_idle_s: 300.0   # requests without a session id are grouped per principal
+                                 # and client (API key or web session, user agent) while they
+                                 # come within this gap (either side); marked inferred
+    capture_filter_values: non_sensitive   # filter values kept: non_sensitive (on fields
+                                 # not sensitive under the effective tags, through Traits and
+                                 # Derivations; key and title by their Attributes) or none
+    max_filter_value_items: 20   # items kept of a list compared by a filter
+    capture_literals: false      # true: keep every filter value, sensitive ones included
+    capture_search_text: true    # keep search text (q, search, match); false: its length only
+    max_query_bytes: 16384       # larger request bodies are recorded as truncated
+    max_text_chars: 500          # longest string kept in a recorded query
+    max_response_bytes: 1048576  # larger responses are recorded without counts and refs
+    max_refs: 500                # Record and Link refs kept per step
+    max_note_chars: 4000         # longest note an agent attaches
+    max_steps_per_session: 2000  # per session and principal; later steps are not written
+    retention_days: 7.0          # steps older than this are deleted
+    prune_interval_s: 300.0
+    prune_batch: 10000           # steps deleted per pass at most
+    queue_size: 10000            # past it steps are dropped (lorebase.trace.steps.dropped)
+    batch_size: 200              # steps per transaction
+    flush_interval_s: 1.0        # longest wait before queued steps are written
+    write_timeout_s: 5.0         # a failed batch is dropped and counted
+
+# Model inference, used by Scribe only. Lorebase never imports a model vendor library: every
+# chat model is an OpenAI-compatible HTTP endpoint, local or hosted.
+inference:
+  llm:                           # tier 2; env aliases LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
+    provider: openai_compatible  # openai_compatible | fake
+    base_url: http://localhost:11434/v1   # local Ollama; in docker compose: http://ollama:11434/v1
+    model: qwen2.5:7b-instruct   # any model name the endpoint serves
+    api_key: null                # hosted endpoints: secret://env/LLM_API_KEY
+    structured_output: json_schema        # json_schema | json_mode. json_schema sends the schema
+                                 # as response_format and steps down (json_mode, then prompt
+                                 # only) when the server rejects it; answers are always validated
+    json_schema_strict: null     # response_format.json_schema.strict; null leaves it out
+    repair_attempts: 1           # repair calls after an invalid answer (0-3)
+    temperature: 0               # null leaves it out, for models that refuse the parameter
+    max_tokens: null             # completion cap; null leaves it to the server
+    max_concurrency: 2
+    timeout_s: 120
+    trust_env: false             # false: proxy variables ignored; true: HTTP(S)_PROXY, NO_PROXY honored
+    retry:                       # 429, 5xx and connection errors; Retry-After is honored
+      max_retries: 3
+      backoff_base_s: 0.5        # wait before retry n: min(backoff_max_s, base * 2**n), jittered
+      backoff_max_s: 30
+    price_per_million_tokens: {input: 0, output: 0}   # zero for local models
+    headers: {}                  # extra HTTP headers; values accept secret references
+    extra_body: {}               # extra request fields, e.g. {reasoning_effort: none}
+    tasks: {}                    # per-task overrides, see the commented example below
+
+    # Hosted OpenAI-compatible endpoint (OpenAI, Azure OpenAI, Mistral, ...):
+    #   base_url: https://api.openai.com/v1
+    #   model: <model name>
+    #   api_key: secret://env/LLM_API_KEY
+    #   price_per_million_tokens: {input: <price>, output: <price>}
+    #
+    # Anthropic through its OpenAI-compatible endpoint (docs/inference-providers.md):
+    #   base_url: https://api.anthropic.com/v1/
+    #   model: claude-haiku-5-5
+    #   api_key: secret://env/ANTHROPIC_API_KEY
+    #   headers: {anthropic-workspace-id: secret://env/ANTHROPIC_WORKSPACE_ID}  # org-level keys
+    #   temperature: null            # refused by current models
+    #   json_schema_strict: true     # required by the endpoint
+    #   extra_body: {thinking: {type: disabled}}
+    #   max_tokens: 4096
+    #
+    # LiteLLM proxy (compose profile `litellm`), reaching Anthropic, Google, Bedrock, ...:
+    #   base_url: http://litellm:4000/v1
+    #   model: <model alias defined in the proxy>
+    #   api_key: secret://env/LITELLM_KEY
+    #
+    # Small local model for bulk extraction, larger hosted model for schema discovery:
+    #   tasks:
+    #     extraction: {model: qwen2.5:7b-instruct}
+    #     schema_discovery:
+    #       base_url: https://api.openai.com/v1
+    #       model: <model name>
+    #       api_key: secret://env/HOSTED_KEY
+
+  embeddings:
+    provider: fastembed          # fastembed | openai_compatible | fake
+    model: BAAI/bge-small-en-v1.5
+    dims: 384                    # must match the model; the vector index uses it
+    batch_size: 32               # texts per model call or request
+    query_prefix: ""             # put before a search query (`lorebase-inference embed --query`); E5: "query: "
+    document_prefix: ""          # put before every Record text Scribe embeds; E5: "passage: "
+    cache_dir: null              # fastembed: where model files are stored (library default)
+    threads: null                # fastembed: CPU threads (library default)
+    base_url: null               # required for openai_compatible, e.g. http://localhost:11434/v1
+    api_key: null
+    timeout_s: 60                # openai_compatible request timeout
+    trust_env: false             # false: proxy variables ignored; true: HTTP(S)_PROXY, NO_PROXY honored
+    retry: {max_retries: 3, backoff_base_s: 0.5, backoff_max_s: 30}
+    # Ollama embeddings instead of fastembed:
+    #   provider: openai_compatible
+    #   base_url: http://localhost:11434/v1
+    #   model: nomic-embed-text
+    #   dims: 768
+
+  local_extractors:              # tier 1, in-process on CPU; optional extra [local-extractors]
+    provider: gliner             # gliner | fake
+    relation_provider: glirel    # glirel | cooccurrence | fake (fake when provider is fake)
+    # Check the license of each checkpoint's weights before enabling it: the libraries are
+    # Apache-2.0, the weights are separate artifacts with their own terms.
+    gliner: {enabled: true, model: urchade/gliner_multi-v2.1, threshold: 0.5, cache_dir: null, window_chars: 1500}
+    glirel: {enabled: true, model: jackboyla/glirel-large-v0, threshold: 0.5, cache_dir: null, window_chars: 1500}
+    cooccurrence: {max_pairs_per_sentence: 200}   # relation_provider: cooccurrence (no model)
+    spacy: {enabled: false, pipeline: en_core_web_sm}
+
+  mode_memory_key: null          # secret keying the digests of remembered structured output
+                                 # modes, e.g. secret://env/LOREBASE_MODE_KEY (changing it forgets)
+  mode_memory_ttl_s: 604800      # seconds a remembered mode counts (7 days)
+  # Deterministic provider for tests and offline runs: set `provider: fake` in llm,
+  # embeddings and local_extractors. No network access is needed.
+  fake:
+    fixtures_dir: null           # directory of <prompt-hash>.json canned chat answers
+    dictionary: {}               # label -> surface forms matched by the fake span extractor
+    max_schema_depth: 6          # nesting depth beyond which optional properties are omitted
+
+# Postgres 16 with the pgvector extension. Environment: LOREBASE__DATABASE__DSN, ...
+database:
+  dsn: postgresql+asyncpg://lorebase@localhost:5432/lorebase   # alias
+                                 # LOREBASE_DB_DSN; e.g. secret://env/LOREBASE_DB_DSN.
+                                 # postgresql:// URLs are switched to the asyncpg driver; without
+                                 # a password, PGPASSWORD or ~/.pgpass is used
+  pool_size: 10                  # connections kept open per process
+  max_overflow: 10               # extra connections under load
+  pool_timeout_s: 30             # wait for a free pooled connection
+  pool_recycle_s: 1800           # replace older connections; -1 never
+  statement_timeout_ms: 30000    # per statement; 0 disables
+  migration_statement_timeout_ms: 0   # while migrations run; 0 disables
+  application_name: lorebase     # shown in pg_stat_activity
+  maintenance_dsn: null          # optional secret: a role that owns mat_records, used by the job
+                                 # worker for per-Attribute index DDL queued by roles that do not
+                                 # own it. Alias LOREBASE_DB_MAINTENANCE_DSN. null: such roles skip
+                                 # index management (`python -m lorebase_store.indexes plan`)
+  application_role: null         # role the services connect as; revisions 0005, 0008 and 0010
+                                 # grant it EXECUTE on the security definer read functions (store
+                                 # schema notes); 0008 and 0010 refuse to run while it may
+                                 # CREATE in the schema of the tables or of pg_trgm. null grants
+                                 # nothing; the role must exist before migrating
+  read_dsn: []                   # read replicas (docs/deployment.md): one URL, a comma-separated
+                                 # string or a list; literals or secret references, e.g.
+                                 # [secret://env/LOREBASE_DB_READ_DSN]. Alias LOREBASE_DB_READ_DSN.
+                                 # Reads are spread round-robin; empty keeps every read on the
+                                 # primary. Each replica gets its own pool, sized as above
+  read_max_lag_ms: 5000          # a replica lagging more than this serves no reads; 0: unchecked
+  read_fallback_to_primary: true # reads no replica can serve go to the primary; false: 503
+  read_probe_timeout_ms: 2000    # budget to reach a replica and run its freshness probe
+  prepared_statement_cache_size: 500  # prepared statements per connection (asyncpg); 0 disables
+
+# Storage engine. `layout` and `embeddings` are read once by the initial migration; the other
+# keys are read at runtime.
+store:
+  layout:
+    hash_partitions: 8           # domain_id hash partitions of objects, tree_nodes, mat_records
+                                 # and mat_links
+  # Storage profile (docs/performance.md#storage-profiles): memory and disk traded for speed.
+  # Applied by `python -m lorebase_store.storage apply` (batched, resumable, reads go on);
+  # until then the database keeps what it has. Each key but `profile` overrides one choice.
+  storage:
+    profile: balanced            # compact | balanced | fast
+    lineage_maps: null           # shared | inline (null: inline with fast, shared otherwise)
+    values_index: null           # GIN index on Record values (null: off with compact)
+    attribute_indexes: null      # all | constraints (null: constraints with compact)
+    lexicon_index: null          # trigram index of the typo lexicon (null: off with compact)
+    embedding_precision: null    # half | full HNSW index (null: half with compact)
+    hnsw_m: null                 # HNSW links per node, 2-100 (null: pgvector's 16)
+    hnsw_ef_construction: 128    # HNSW build candidate list, >= 2 * hnsw_m (null: pgvector's 64);
+                                 #   both apply to indexes built from then on; an existing index
+                                 #   keeps its own until rebuilt (docs/operations.md)
+    compression: null            # lz4 | pglz for values above ~2 kB (null: pglz with compact)
+    records_fillfactor: null     # 50-100 (null: 90 with fast, 100 otherwise)
+    prewarm: null                # apply ends with `storage prewarm` (null: on with fast)
+    bm25_index: null             # BM25 index of search; needs pg_search (null: off in every profile)
+    prewarm_fraction: 0.8        # share of shared_buffers the prewarm may fill
+    batch_rows: 2000             # rows rewritten per transaction by `storage apply`
+    lock_timeout_ms: 2000        # wait for a table lock in `storage apply`, then retry later
+  embeddings:
+    dims: 384                    # HNSW index dimension; must equal inference.embeddings.dims
+  # Value index of POST /resolve (design 8.9): distinct short values per branch, kept by
+  # triggers on mat_records. Enums and `resolvable: true` Attributes are always held;
+  # sensitive, vault, `resolvable: false` and non-string Attributes never; plain strings
+  # while their distinct values on the default branch stay within the thresholds below.
+  values:
+    enabled: true                # false drops every selection on the next pass
+    max_value_chars: 64          # longer values are left out
+    max_distinct: 1000           # a plain string with more distinct values is not held
+    max_distinct_ratio: 0.2      # ...nor one whose distinct values exceed this share of Records
+    ratio_min_records: 50        # Records a Kind needs before max_distinct_ratio applies
+    hysteresis: 1.2              # a held plain string is dropped only past this factor
+    hard_max_distinct: 10000     # values of one Attribute any branch may hold, enums included
+    stats_interval_s: 3600.0     # distinct values counted again this often (schema change: at once)
+    max_added_per_pass: 20       # Attributes one pass adds; the rest go to the next pass
+    pass_timeout_ms: 120000      # budget of a pass once it holds the Domain's lock (writers wait)
+  # Phrases POST /resolve matched to nothing (design 8.10), kept for vocabulary suggestions.
+  # They are free text typed by callers: off by default, pruned after retention_days, deleted
+  # with their Domain (`lorebase-scribe misses purge DOMAIN` deletes them at once).
+  resolve_misses:
+    enabled: false               # Keeper records, Scribe prunes and consolidates
+    retention_days: 30.0         # a phrase not seen for this long is deleted
+    min_phrase_chars: 3          # shorter phrases are not recorded
+    max_phrase_chars: 64         # longer ones neither (an alias is at most 128 characters)
+    ignore_words: []             # filler words never recorded alone, e.g. [how, many, the]
+    max_per_domain: 10000        # phrases kept per Domain; a new one evicts the least missed
+                                 # (no more missed than it) or is dropped
+    max_phrases_per_caller: 500  # phrases one caller alone may hold per Domain
+    max_callers: 20              # distinct callers counted per phrase (digests, never names)
+    caller_key: null             # REQUIRED when enabled: >= 32 characters, e.g.
+                                 # secret://env/LOREBASE_MISS_CALLER_KEY; keys the HMAC-SHA256
+                                 # caller digests. Changing it counts distinct callers afresh
+    prune_batch: 5000            # expired phrases deleted per statement
+  # Records and missing values per Kind of the default branch head, behind the coverage block
+  # of queries and resolutions (design 8.11); counted by Scribe, looked up by reads.
+  coverage:
+    enabled: true
+    max_records_per_kind: 1000000  # larger Kinds are counted over a sample (marked approximate)
+    statement_timeout_ms: 120000   # per Kind; a Kind that times out keeps its statistics
+    min_interval_s: 300.0        # a Kind counted more recently is not recounted (unseen Records are)
+  writes:
+    insert_batch_rows: 1000      # rows per multi-row INSERT
+    copy_threshold_rows: 5000    # larger batches use COPY into a staging table; 0 disables COPY
+  nodes:
+    cache_bytes: 67108864        # in-process LRU cache of tree nodes (64 MiB); 0 disables it
+    prefetch_batch: 1000         # node hashes per prefetch query
+  commit:
+    lock_timeout_ms: 10000       # wait for the branch lock before failing; 0 waits forever
+    prefetch_batch: 1000         # keys per query when validation prefetches materialized rows
+  materialize:
+    text_search_config: simple   # Postgres text search configuration of Record search vectors
+    read_batch_rows: 5000        # rows or object bodies per query in rebuild and verification
+    verify_max_divergences: 1000 # divergences listed by a verification report
+    derivations_enabled: true    # recompute expression and aggregate Derivations on every
+                                 # commit, merge and rebuild (derived column, not the tree)
+    fast_forward_history_max_revisions: 1000    # Revisions of a fast-forward written to the
+                                 # history one by one; longer: one row at the source head
+    derivation_max_incremental_records: 10000   # Records one Derivation recomputes per
+                                 # commit; above, every Record of its Kind
+    branch_mode: copy            # default mode of new branches: copy (full rows) or overlay
+                                 # (only changed rows over the base, docs/store-schema-notes.md)
+    overlay_branch_prefixes: [agent/, extract/, source/]   # these default to overlay
+    overlay_max_rows: 50000      # an overlay holding more rows is promoted to a full copy
+    overlay_max_base_lag_revisions: 1000   # generations the base may move past the fork
+                                 # point before the overlay is promoted
+    overlay_max_per_branch: 32   # open overlays per base branch; further branches are copies
+    async_copy_min_rows: 10000   # larger copies run as jobs: from an overlay, or built from
+                                 # the tree (overlay sources, older Revisions)
+    async_delete_min_rows: 10000 # larger branches are hidden at once, a job deletes the rows
+    job_batch_rows: 5000         # most rows per transaction of a branch copy or deletion job
+    job_batch_min_rows: 100      # fewest rows per batch; batches start at this size
+    job_batch_target_ms: 200     # branch lock hold a batch aims at while no commit waits
+    job_batch_contended_ms: 50   # hold a batch aims at once a commit waited for the lock
+    job_concurrency: 2           # branch copy and deletion jobs running at once (all workers)
+    job_retry_seconds: 10        # delay before a branch job that had to wait runs again
+    copy_max_failures: 3         # failed copy jobs before an overlay is rebuilt from its tree
+    copy_retry_max_seconds: 3600 # longest delay before a failed copy is retried
+  gc:                            # garbage collection (docs/operations.md)
+    grace_seconds: 3600          # Revisions younger than this are kept with all they reach
+    mark_batch: 1000             # tree node hashes per query while marking
+    sweep_batch_rows: 5000       # rows deleted per transaction while sweeping
+    guard_branch_locks: true     # hold every branch lock (try-lock) around each sweep batch
+    max_guarded_branches: 500    # refs one sweep batch may lock; more refs need a larger value
+    guard_wait_seconds: 60       # wait for in-flight commits before the collection stops
+    guard_retry_ms: 200          # pause between lock attempts
+  jobs:                          # job queue workers
+    max_attempts: 3              # runs of a job before it is marked failed
+    retry_delay_seconds: 60      # delay before a failed job runs again
+    stale_after_seconds: 90      # running jobs without heartbeat for this long are reclaimed (worker gone)
+  outbox:                        # outbox events, shared by every consumer (design 10.5)
+    retention_s: 604800.0        # events every consumer handed off are kept this long (7 days)
+    max_age_s: 2592000.0         # events are deleted after this even when still pending (30 days)
+    prune_batch: 10000           # events deleted per reason by one batch (own transaction)
+    prune_budget_s: 5.0          # seconds one pruning pass keeps deleting batches
+  bundle:                        # Domain export and import (docs/operations.md)
+    batch_rows: 5000             # rows read, written or verified per batch
+    compression: gzip            # gzip | none, applied to the .jsonl files
+    compression_level: 6         # gzip level 1-9
+    verify_after_import: true    # verify rebuilt branches against their trees
+    max_member_bytes: 17179869184   # import: largest file, counted as read after gzip (16 GiB)
+    max_total_bytes: 68719476736    # import: largest sum of file sizes (64 GiB)
+    max_entries: 100000          # import: most files and directories in a bundle
+    max_line_bytes: 67108864     # import: longest .jsonl record and largest .json file (64 MiB)
+  profiling:                     # profilers feeding schema inference (docs/inference.md)
+    csv:
+      sample_rows: 10000         # rows kept per file; every row is still counted
+      sampling: reservoir        # head (first rows) | reservoir (uniform, seeded, file order)
+      seed: 0                    # reservoir seed: the same file gives the same rows
+      encodings: [utf-8-sig, cp1252]   # tried in order
+      sniff_bytes: 65536         # leading bytes used to detect the delimiter
+      delimiters: ",;\t|"        # delimiters the sniffer may pick; .tsv files use a tab
+      max_columns: 500           # wider files are refused
+    records:                     # rows read as records: JSON, JSON Lines, Parquet, HTTP JSON
+      sample_rows: 10000         # rows kept per table; every row is still counted
+      sampling: reservoir        # head (first rows) | reservoir (uniform, seeded, read order)
+      seed: 0
+      max_columns: 500           # tables with more distinct columns are refused
+      batch_rows: 10000          # rows decoded per batch of an uploaded Parquet file
+    postgres:
+      sample_rows: 10000         # rows read per table (LIMIT), in a read-only transaction
+      max_tables: 200            # tables profiled per request
+      statement_timeout_ms: 15000
+      exact_row_count: false     # true: count(*) per table; false: planner estimate
+    sql:                         # MySQL, MariaDB and SQL Server tables (drivers: keeper extras)
+      sample_rows: 10000         # rows read per table (LIMIT / TOP)
+      max_tables: 50             # tables profiled per request
+      total_timeout_s: 120       # all the tables of a request
+      max_value_chars: 1000      # longer text is cut; unbounded binary and unknown types are skipped
+      statement_timeout_ms: 15000
+      connect_timeout_s: 10.0
+      count_rows: true           # count(*) per table so a partial sample is known as such
+
+  indexes:                       # per-Attribute partial indexes on mat_records
+    enabled: true                # false: an administrator manages them. A commit role that does
+                                 # not own mat_records queues them for the job worker when
+                                 # database.maintenance_dsn is set, else skips them (warning)
+    inline_max_rows: 50000       # larger Kinds get their indexes from a queued concurrent build
+    job_batch: 10                # queued index jobs claimed per runner pass
+  reads:
+    schema_cache_entries: 256    # compiled schemas per process, keyed by head Revision id
+    max_page_rows: 500           # largest page of Records, Links or query results
+    max_search_rows: 100         # largest full-text search result
+    search_candidates: 1000      # matches ranked per search (bounds very common terms)
+    max_hydrate_keys: 1000       # Records per batched hydration
+    use_definer_functions: true  # search, incoming Links, neighborhoods and attribute queries
+                                 # through the security definer functions, whose index plans
+                                 # survive row-level security; false: the same SQL, plain
+    definer_ceilings:            # largest counts the definer functions accept (NULL and values
+                                 # outside 1..ceiling are refused). Read when revisions 0008, 0010 run,
+                                 # later changes have no effect; each must be at least the cap
+                                 # above (traverse below) that the read primitives pass
+      limit: 10000               # rows of a page or search: >= max_page_rows, max_search_rows
+      candidates: 100000         # search candidates: >= search_candidates
+      depth: 10                  # neighborhood hops: >= traverse.max_depth
+      fanout: 10000              # Links per Record and hop: >= traverse.max_fanout
+      max_steps: 1000000         # Links walked plus seeds: >= traverse.max_links + max_seeds
+      max_nodes: 100000          # Records of a neighborhood: >= traverse.max_nodes
+  traverse:                      # neighborhood caps and path Derivation fan-out
+    max_depth: 3                 # hops
+    max_seeds: 50                # seed Records
+    max_fanout: 50               # Links followed per Record and hop
+    max_links: 2000              # Links walked, breadth first
+    max_nodes: 200               # Records returned, nearest first
+    path_fanout: 100             # Links a path Derivation follows per intermediate Record
+
+# Static validation of schemas, shared by Keeper and the store: schema change sets, the commit
+# pipeline, merges and schema inference apply the same rules.
+schema:
+  expressions_enabled: true      # accept Operations and Derivations written in CEL (parsed and
+                                 # type checked); false refuses them (schema.expressions_disabled)
+  expression_limits:             # budget of one schema expression: compiled at validation,
+                                 # evaluated by the materializer for Derivations
+    max_source_length: 4096
+    max_depth: 48
+    max_steps: 10000
+    max_duration_ms: 250
+    max_list_size: 10000
+    max_string_length: 65536
+    max_record_lookups: 100
+    decimal_precision: 34
+  suggestions:                   # schema suggestions from extraction (docs/extraction.md)
+    min_support: 2               # observations before a pending suggestion is listed
+    max_suggestions: 50          # listed at most, the best supported first
+    max_examples: 3              # evidence examples kept per suggestion
+    max_samples: 20              # distinct sample values kept per suggestion
+    max_labels: 5                # labels (as written) kept per suggestion
+    max_tracked: 2000            # extraction suggestions kept per Domain; new ones beyond are dropped
+    max_vocabulary_tracked: 500  # pending vocabulary suggestions (resolution misses), counted apart
+    name_similarity: 0.85        # least similarity of a name to an existing element's
+    synonyms: [[supplier, vendor], [contract, agreement], [part, component, item],
+               [plant, site, facility], [purchase_order, order], [customer, client],
+               [quantity, qty]]  # names meaning the same element (snake_case, singular)
+    merge_similarity: 0.6        # least word overlap (Jaccard) for two Attribute suggestions of
+                                 # one Kind with samples of one value type to count as one
+    kind_stoplist: [section, clause, article, paragraph, chapter, annex, appendix, schedule,
+                    exhibit, attachment, page, table, figure, document, proposal]
+                                 # generic words never suggested as a Kind
+    kind_min_attributes: 2       # Attribute suggestions (or observations) a new Kind needs
+                                 # before it is listed; 0 lists every Kind
+    kind_independent_instances: 2   # distinct codes that make a Kind an entity of its own, kept
+                                 # although an Attribute has its name; 0 turns it off
+    kind_independent_attributes: 2  # Attributes owned by a proposed Kind with the same effect
+    # type_inference: options of schema inference (as keeper.schema_inference.options) that
+    # type new Attributes from their samples; defaults differ in min_support_values: 5,
+    # enum_min_values: 5 and propose_max_length: false
+
+# Read path of Keeper (design 8). Reads hit the materialized head of a branch; `at=<revision>`
+# reads go through the Revision tree.
+read:
+  records:                       # pages of Records and Links
+    default_limit: 50
+    max_limit: 500
+  log:                           # pages of a branch log
+    default_limit: 50
+    max_limit: 500
+  history:                       # per-Record history pages and lineage
+    default_limit: 50
+    max_limit: 500
+    lineage_scan_changes: 1000   # newest changes searched for rows without lineage revisions
+    lineage_count_max: 10000     # changes counted; beyond, changes_truncated is true
+  statement_timeout_ms: 2000     # statement_timeout of read transactions; 0 disables
+  schema_cache_entries: 64       # compiled schemas kept in memory, by schema hash
+  query:                         # limits of the query DSL
+    max_via_depth: 3             # nesting of via and count predicates
+    max_predicates: 64
+    max_in_values: 1000
+    max_order_terms: 4
+    max_includes: 5              # Relations in `include`
+    include_default_limit: 10    # neighbors per Record in `include`
+    include_max_limit: 50
+    max_aggregate_groups: 1000   # groups returned by `aggregate`; more are cut
+  traverse:                      # POST /traverse and POST /neighborhood; a neighborhood is also
+                                 # bounded by store.traverse (the smaller cap applies)
+    max_hops: 5
+    max_nodes_per_hop: 1000
+    max_seeds: 100
+    max_depth: 3
+    max_nodes: 2000
+    max_edges: 5000
+  time_travel:
+    max_scan_entries: 100000     # largest Kind or Relation partition listed at a Revision
+    snapshot_max_entries: 100000 # largest Revision (Records + Links) materialized for filters,
+                                 # search, traversal, history and health at it; larger refused
+    snapshot_max_history_revisions: 100000 # deeper histories (generation + 1) are refused
+    snapshot_max_per_domain: 4   # snapshots per Domain (being deleted included); oldest
+                                 # unused dropped first, 503 when none can go
+    snapshot_min_age_s: 60       # grace period before a snapshot may be dropped
+    snapshot_max_concurrent_builds: 2 # per process; each uses a second DB connection
+    snapshot_build_wait_ms: 5000 # wait for a build slot before answering 503
+    snapshot_builds_per_minute: 6 # per principal and process (429 beyond)
+    snapshot_build_burst: 3
+  diff:
+    max_changes: 100000          # larger diffs are refused; narrow them with kinds/relations
+    page:
+      default_limit: 100
+      max_limit: 1000
+  health:                        # GET .../health and .../kinds/{kind}/health (docs/agents.md)
+    max_records_validated: 5000  # Records of a Kind re-validated; larger Kinds are sampled
+    examples_per_issue: 3        # Record keys listed per kind of violation
+    max_issue_groups: 50         # kinds of violation listed per Kind
+    duplicates_max_records: 200000   # larger Kinds skip the duplicate check; 0 turns it off
+    max_duplicate_groups: 20     # duplicate groups listed per Attribute
+    duplicate_keys_per_group: 5
+    orphan_examples: 5           # orphan Links and Records with a gap listed per Relation
+    statement_timeout_ms: 15000  # for the scans, instead of read.statement_timeout_ms; 0 disables
+  coverage:                      # the coverage block of POST /query and /resolve (design 8.11)
+    enabled: true                # default of requests that do not say `coverage`
+    note_min_share: 0.01         # least share of Records missing an Attribute for a note
+    max_unseen_age_s: 3600.0     # older counts of Records unseen by Sources: approximate
+
+# Search (design 8.4). Keeper never computes embeddings: semantic and hybrid search take the
+# caller's query_vector. The text search configuration is store.materialize.text_search_config
+# and the vector dimension store.embeddings.dims.
+search:
+  results:
+    default_limit: 20
+    max_limit: 100
+  candidates: 200                # rows of each ranked list before fusion and paging
+  # Ranking of lexical search without filters: postgres (ts_rank_cd over the GIN index) or
+  # bm25 (the BM25 index of ParadeDB pg_search, an optional AGPL-3.0 extension; build it with
+  # store.storage.bm25_index, docs/search.md#bm25-ranking). Without it search keeps postgres.
+  backend: postgres
+  # Typo tolerance: a query word the branch does not hold is corrected to its closest words
+  # in the branch's word lexicon (trigram similarity) and searched as (word | correction ...).
+  trigram_threshold: 0.3         # least similarity of a correction to the query word
+  trigram_weight: 0.5            # weight of ts_rank_cd for hits found only through corrections
+                                 # (they always rank after the hits of q as written)
+  typo_candidates: 3             # corrections tried per unknown word; 0 turns typo tolerance off
+  typo_min_length: 4             # shortest query word (characters) that is corrected
+  # Lexical search without filters: the word lexicon bounds the matches of q. Within
+  # common_term_docs every match is ranked; when every term is more common, only the first
+  # common_term_candidates matches in index order are, and the response says
+  # truncated_candidates. 0 ranks store.reads.search_candidates matches whatever the terms.
+  common_term_docs: 2000
+  common_term_candidates: 1000
+  headline_options: "MaxWords=30, MinWords=10, MaxFragments=2"   # ts_headline of snippets
+  # Partial matching: when q as written (every term) finds fewer than min_results Records,
+  # Records holding some of its terms follow, after every full match (`match: partial`).
+  partial:
+    min_results: 1               # full matches below which partial ones are added; 0 turns it off
+    weight: 0.5                  # score: weight * (ts_rank_cd of the terms OR-ed
+    term_bonus: 1.0              #   + term_bonus * terms the Record holds)
+    candidates: 100              # partial matches ranked per search
+  semantic:
+    model: BAAI/bge-small-en-v1.5   # embedding model searched: the name Scribe stores vectors
+                                    # under (inference.embeddings.model; `fake:<model>` for the
+                                    # fake provider)
+    # Vector search under filters (Kinds, Traits, lens, where) keeps its limit (design 8.8):
+    iterative_scan: auto         # auto: hnsw.iterative_scan = relaxed_order with pgvector >= 0.8
+                                 #   (see /readyz); off: over-fetch by overfetch_factor instead
+    max_scan_tuples: 20000       # hnsw.max_scan_tuples of an iterative scan; past it the
+                                 #   response says semantic_truncated
+    overfetch_factor: 4          # the index returns candidates * factor nearest vectors of the
+                                 #   searched Kinds before the Records' filters apply; it also
+                                 #   sets hnsw.ef_search (capped at 1000), which bounds recall
+  hybrid:                        # reciprocal rank fusion: w / (rrf_k + rank) per list
+    rrf_k: 60
+    lexical_weight: 1.0
+    semantic_weight: 1.0
+  # POST /resolve (design 8.9): words of a text to candidate Kinds, Attributes and indexed
+  # values (store.values). Phrases of 1..max_phrase_words words, longest first; levels in
+  # order, a phrase stopping at the first that matches.
+  resolve:
+    results:
+      default_limit: 20
+      max_limit: 100
+    max_text_chars: 500
+    max_words: 40                # words of the text considered
+    max_phrase_words: 3
+    min_word_chars: 2            # shorter words are never matched alone
+    trigram_min_chars: 3         # shortest phrase matched by similarity
+    trigram_threshold: 0.45      # least trigram similarity of a similar match
+    per_phrase: 5                # similar values kept per phrase
+    exact_per_phrase: 20         # exact value matches read per phrase form
+    separators: ",;:!?()[]{}\""  # split words besides blanks; others stay in words (C++, S/M)
+    edges: ".'"                  # stripped from both ends of each word
+    plural_rules: [["s", ""], ["es", ""]]   # (plural, singular) suffixes folded both ways
+    embedding_records: 10        # nearest Records read by the embedding level
+    levels: {exact: true, synonym: true, trigram: true, embedding: true}
+    scores: {exact: 1.0, synonym: 0.95, trigram: 0.85, embedding: 0.7, description: 0.6}
+    misses:                      # recording of what matched nothing (store.resolve_misses)
+      permission: data.read      # needed Domain-wide for a caller's misses to be kept
+      record_below_score: null   # also keep phrases whose best candidate scores below this
+      queue_size: 10000          # distinct phrases held in memory between writes
+      max_new_per_caller: 100    # new phrases one caller adds per Domain between writes
+      flush_interval_s: 5.0      # longest wait in memory before a batch write
+      write_timeout_s: 5.0
+
+# Agent-facing reads (docs/agents.md). Context packs are also bounded by read.traverse;
+# nothing here calls a model.
+agents:
+  context:                       # POST /domains/{d}/context
+    default_budget_tokens: 4000  # estimated token budget when the request gives none
+    max_budget_tokens: 32000
+    chars_per_token: 4.0         # estimate: tokens = ceil(characters / chars_per_token)
+    default_depth: 1             # neighborhood depth when the request gives none
+    max_depth: 2
+    max_seeds: 20                # seed Records of one pack
+    max_neighbors: 200           # Records around the seeds
+    max_links: 500
+    recent_changes_max: 50       # change entries read before trimming, newest first
+    trim_order:                  # sections trimmed, in this order, to fit the budget
+      - lineage
+      - recent_changes
+      - far_neighbor_values
+      - far_neighbors
+      - schema_descriptions
+      - near_neighbor_values
+      - near_neighbors
+      - schema
+  explain:                       # GET /domains/{d}/kinds/{kind}/records/{key}/explain
+    max_links: 100               # Links listed with their origin
+    max_proposals: 20            # Proposals that changed the Record
+  feed:                          # GET .../branches/{b}/events (SSE) and .../changes
+    poll_interval_s: 1.0         # how often an open stream looks for new events
+    heartbeat_s: 15.0            # comment line after this much silence
+    max_connection_s: 300.0      # streams close after this long; clients resume with Last-Event-ID
+    reauthorize_interval_s: 60.0 # open streams check credential and grants again this often and
+                                 # close when refused (grants seen after keeper.auth.authz cache)
+    retry_ms: 3000               # reconnection delay advised to clients
+    batch_events: 100            # events read per poll
+    changed_keys_max: 100        # changed Record keys listed per event
+    changes:                     # pages of GET .../changes
+      default_limit: 50
+      max_limit: 500
+    max_scan: 10000              # first-parent Revisions walked back to find `since`
+
+# Webhooks (design 10.5): managed through Keeper, delivered from the outbox by
+# lorebase_store.webhooks.deliver_pending (run periodically by a worker).
+webhooks:
+  allowed_schemes: [https]       # URL schemes a webhook may use
+  allow_private_targets: false   # refuse loopback, private and link-local targets
+  max_per_domain: 20
+  secret_bytes: 32               # random bytes of a new signing secret
+  encryption_key: null           # secret://... (32+ characters) encrypting signing keys at rest;
+                                 # same value for Keeper and Scribe; null: Keeper refuses to
+                                 # create webhooks (compose and Helm supply one)
+  allow_unsealed_keys: false     # local development only: without encryption_key, store new
+                                 # signing keys usable instead of refusing
+  previous_encryption_keys: []   # earlier keys, tried to open; keys are re-encrypted under the new
+  signature_header: Lorebase-Signature   # t=<unix>,v1=<hex HMAC-SHA256 of "<t>.<body>">
+  event_header: Lorebase-Event
+  delivery_header: Lorebase-Delivery
+  idempotency_header: Idempotency-Key   # evt_<sequence>, the same on every attempt of an event
+  masked_value: "***"            # sensitive values a webhook is not cleared for
+  erased_value: "[erased]"       # vault values erased before a cleared webhook receives them
+  timeout_s: 10.0                # time budget of one attempt as a whole (lookup, connects, status)
+  connect_timeout_s: 5.0         # connecting to one address; then the next checked one (<= timeout_s)
+  max_attempts: 8                # then the delivery is marked dead
+  backoff_base_s: 30.0           # delay after the first failure ...
+  backoff_factor: 2.0            # ... multiplied by this after each next one ...
+  backoff_max_s: 3600.0          # ... up to this
+  lease_s: 120.0                 # a claimed delivery is retried by another worker after this;
+                                 # a pass running longer is abandoned (> pass_timeout_s + timeout_s)
+  batch: 100                     # events and deliveries per worker pass
+  concurrency: 8                 # attempts of one pass in flight at the same time
+  pass_timeout_s: 60.0           # no attempt starts after this; the rest go to the next pass
+  changed_keys_max: 100          # changed Record keys listed per event payload
+  retention_s: 604800.0          # finished deliveries kept (7 days; events: store.outbox)
+
+# Personal data vault (design 13.5; docs/threat-model.md): values of `pii` Attributes with
+# `vault: true` are stored encrypted here, Records hold tokens, and `lorebase admin erase`
+# erases them on every Revision. Keeper, Scribe and every committing process need the same keys.
+vault:
+  token_key: null                # secret://... (32+ characters) keying tokens and value
+                                 # fingerprints; never change it once values are stored
+  encryption_key: null           # secret://... (32+ characters) encrypting new values
+  key_id: "1"                    # id stored with values sealed under encryption_key
+  previous_keys: {}              # earlier encryption keys by id, still opened
+
+# Herald, the MCP server (design 11.2; docs/mcp.md). Short variables set by MCP host
+# configurations: LOREBASE_URL (keeper.base_url), LOREBASE_API_KEY (keeper.api_key),
+# LOREBASE_DOMAIN (domain), LOREBASE_BRANCH (branch).
+herald:
+  transport: stdio               # stdio or streamable_http
+  server_name: lorebase
+  domain: null                   # Domain used when a call names none
+  branch: null                   # null: the Domain's default branch
+  log_level: WARNING             # log level of the MCP SDK
+  keeper:
+    base_url: http://127.0.0.1:8080
+    api_prefix: /api/v1
+    api_key: null                # stdio only: the agent's key, e.g. secret://env/AGENT_API_KEY
+    timeout_s: 30
+    max_retries: 2               # resends after 429, 503 or no connection; 0 turns retries off
+    retry_max_wait_s: 5          # longest pause before a retry; Retry-After is capped to it
+    verify_tls: true
+    trust_env: false             # false: proxy variables ignored; true: HTTP(S)_PROXY, NO_PROXY honored
+    user_agent: lorebase-herald
+  http:                          # streamable_http: each caller sends its own key
+    host: 127.0.0.1
+    port: 8090
+    path: /mcp
+    stateless: true
+    json_response: true
+    allowed_hosts: []            # e.g. [herald.example.com]; empty: SDK default for the host
+    allowed_origins: []
+    credential_header: Authorization
+    allow_anonymous: false       # true: calls without a credential go to Keeper without one;
+                                 # local stacks with keeper.auth.mode none only (Keeper decides)
+  output:
+    default_format: text         # text (compact) or json
+    max_chars: 12000             # longer outputs are cut with a [truncated ...] marker
+    max_items: 50
+    max_value_chars: 240
+    max_issues: 20
+  context:                       # lorebase_context packs
+    token_budget: 3000
+    max_token_budget: 20000
+    depth: 1
+    max_seeds: 5
+    search_seeds: 3
+  neighborhood:
+    default_depth: 1
+    max_depth: 3
+    default_max_nodes: 50
+    max_nodes: 500
+    max_edges: 1000
+    max_seeds: 20
+  changes:
+    page_size: 50
+    max_pages: 10
+  trace:                         # agent trace headers on every Keeper call (keeper.trace)
+    enabled: true                # false: send no session, tool or traceparent header
+    session_header: X-Lorebase-Session
+    tool_header: X-Lorebase-Tool
+    trace_header: X-Lorebase-Trace
+    opt_in: false                # true: send "<trace_header>: on" on every call
+    session_id: null             # session when the caller names none; null: MCP session id, else none (Keeper infers)
+
+# Guide, the optional exploration assistant (docs/guide.md): POST /embed and POST /explore.
+# It holds no Keeper credential: every read carries the caller's own. Its chat model is the
+# `inference.llm` model with the overrides of `inference.llm.tasks.<agent.task>`.
+guide:
+  host: 127.0.0.1
+  port: 8095
+  readiness_timeout_s: 3         # /readyz probes Keeper's /healthz
+  data_dir: ~/.local/state/lorebase/guide    # Guide's own state files
+  mode_memory_file: structured_output_modes.json  # remembered structured output modes; null: off
+  keeper:
+    base_url: http://127.0.0.1:8080
+    api_prefix: /api/v1
+    timeout_s: 30
+    max_retries: 1               # resends after 429, 503 or no connection; 0 turns retries off
+    retry_max_wait_s: 3
+    verify_tls: true             # Keeper is reached directly; proxy variables are ignored
+    user_agent: lorebase-guide
+  http:
+    allowed_origins: []          # browser origins allowed (CORS and Origin check), e.g.
+                                 # [https://lorebase.example.com]
+    default_origins: []          # used while allowed_origins is empty (an explicit [] logs a
+                                 # warning); compose sets the web service's origins
+    credential_header: Authorization
+    session_cookie: ""           # Keeper's session cookie name (e.g. __Host-lorebase_session)
+                                 # when Guide is served under the web app's origin; empty: off
+    csrf_header: X-CSRF-Token    # must hold the session's token; checked against Keeper
+    allow_anonymous: false       # true only with a Keeper in auth mode none, on a local stack
+    max_body_bytes: 16384
+  trace:                         # agent trace (docs/agent-trace.md)
+    enabled: true                # session headers on every read, reasoning posted as notes
+    session_header: X-Lorebase-Session
+    tool_header: X-Lorebase-Tool
+    opt_in_header: X-Lorebase-Trace
+    opt_in_value: "on"           # empty: no opt-in header (Keeper's trace settings decide)
+    notes: true                  # post reasoning as session notes (a write to Keeper's trace
+                                 # store with the caller's credential); false: headers only
+    notes_path: /trace/sessions/{session}/notes
+    max_note_chars: 2000
+  agent:                         # a request may lower these budgets, never raise them
+    task: explore                # inference.llm.tasks.explore overrides the chat model
+    max_steps: 8                 # tool calls; then one last turn to answer
+    max_tokens_per_call: 1024    # completion cap of one model call
+    max_total_tokens: 40000      # input + output tokens of one exploration
+    timeout_s: 120               # wall clock of one exploration
+    max_question_chars: 2000
+    max_result_chars: 6000       # tool result text shown to the model; longer is cut
+    max_value_chars: 300
+    max_items: 20
+    max_depth: 2
+    max_nodes: 60
+    max_context_tokens: 3000
+    max_answer_chars: 4000
+    temperature: null            # null: the chat model's own (inference.llm.temperature)
+  limits:                        # per process; protects the model budget
+    max_concurrent: 4
+    max_concurrent_per_caller: 1
+    explorations_per_minute: 6   # per credential
+    embeds_per_minute: 120       # per credential
+    max_embed_chars: 2000
+    max_concurrent_verifications: 16   # credential checks against Keeper at once; more: 429
+    max_tracked_callers: 10000   # callers counted by the rate windows; full: new callers 429
+
+# Scribe, the job worker (docs/scribe.md): Source synchronization, webhook delivery, queued
+# per-Attribute index DDL (`store.index`, as database.maintenance_dsn when set) and garbage
+# collection. Job retries and stale locks: store.jobs.
+scribe:
+  worker:
+    concurrency: 2               # jobs run at the same time by one process
+    poll_interval_s: 2.0         # pause of an idle slot before it looks for jobs again
+    heartbeat_interval_s: 30.0   # running jobs refresh their lock this often (<= stale_after_seconds / 2)
+    shutdown_grace_s: 30.0       # on SIGTERM, running jobs get this long, then go back to the queue
+    shutdown_cancel_s: 5.0       # then cancelled jobs get this long to stop before they are released anyway
+    outcome_retry_delay_s: 1.0   # pause before the one more try at writing an outcome the store refused; failing again, the run counts unrecorded and the job runs again once its lock goes stale
+    liveness_file: null          # file the job loop rewrites every liveness_interval_s with its live slots, running jobs and last store round trip, for a healthcheck or probe (python -m lorebase_scribe.liveness FILE); null writes none
+    liveness_interval_s: 10.0    # how often the liveness file is rewritten
+    statement_timeout_ms: 0      # Scribe's own connections; 0 disables (GC and index builds run long)
+    principal: svc_scribe        # author of Scribe's commits and Proposals
+    types: []                    # job types this process runs; empty: all of them
+  scheduler:                     # one process at a time is leader (Postgres advisory lock)
+    enabled: true
+    tick_s: 15.0                 # interval between scheduling passes
+    lock_name: lorebase.scribe.scheduler   # hashed into the advisory lock key
+    webhook_interval_s: 10.0     # webhook delivery pass (retries included); 0 disables
+    gc_schedule: "0 3 * * *"     # cron (UTC) of the collection of every Domain; null disables
+    gc_dry_run: false
+    source_schedules: true       # queue Source synchronizations from each Source's `schedule`
+    embeddings_interval_s: 60.0  # embedding pass of every Domain; 0 disables
+    value_index_interval_s: 300.0  # value index pass of every Domain (store.values); 0 disables
+    coverage_interval_s: 300.0   # coverage statistics of every Domain (store.coverage); 0 disables
+    consolidation_interval_s: 3600.0   # misses -> vocabulary suggestions, while
+                                 # store.resolve_misses.enabled; 0 disables
+    audit_verify_interval_s: 86400.0   # verification of every audit hash chain; 0 disables
+    domain_batch: 100            # Domains read per query
+  sources:                       # Source synchronization (design 9.1)
+    allowed_connections: []      # secret references a Source `connection` (or an http_json
+                                 # header value) may name, e.g. secret://env/ERP_DSN;
+                                 # empty: no Source can be synchronized
+    commit_batch: 5000           # changes per Revision; one row's changes are never split
+    max_row_errors: 100          # skipped rows tolerated; more fail the run without committing
+    error_samples: 20            # row errors kept in the run record
+    auto_merge_protected: true   # automatic merge policies also merge into protected branches
+                                 #   (waives required_approvals, not steward or role rules)
+    # What an upstream change does to a value someone else set since the last sync is set per
+    # Source in the schema: `local_edits: review` (default: a Conflict), `keep` or `source_wins`.
+    csv:
+      allowed_roots: []          # directories local CSV files may be read from; empty: none
+      allowed_hosts: []          # hosts CSV URLs may point at; empty: none
+      allowed_schemes: [https]
+      allow_private_targets: false   # true: URL hosts may resolve to private/loopback addresses
+      max_bytes: 104857600       # larger files or downloads are refused (100 MiB); reads stop here
+      timeout_s: 60.0            # time budget of one download, lookup included
+      encodings: [utf-8-sig, cp1252]   # tried in order
+      delimiters: ",;\t|"        # delimiters the sniffer may pick; .tsv files use a tab
+      sniff_bytes: 65536
+    json_files:                  # json and jsonl Sources (local files)
+      allowed_roots: []          # directories JSON files may be read from; empty: none
+      max_bytes: 104857600       # largest json document, parsed whole (100 MiB)
+      max_line_bytes: 16777216   # longest jsonl line (16 MiB); jsonl files are streamed
+    parquet:                     # parquet Sources (local files; needs lorebase-scribe[parquet])
+      allowed_roots: []          # directories Parquet files may be read from; empty: none
+      batch_rows: 10000          # rows decoded per batch; files are streamed, never read whole
+    http_json:                   # http_json Sources (GET, JSON responses, pagination)
+      allowed_hosts: []          # hosts URLs (next pages included) may point at; empty: none
+      allowed_schemes: [https]
+      allow_private_targets: false   # true: hosts may resolve to private/loopback addresses
+      timeout_s: 30.0            # time budget of one request, lookup included
+      max_bytes: 52428800        # larger responses are refused (50 MiB)
+      max_pages: 1000            # more pages fail the run; a Source's http.max_pages may lower it
+      max_attempts: 4            # attempts per request, the first included
+      retry_statuses: [429, 500, 502, 503, 504]   # retried, as are network errors and timeouts
+      backoff_base_s: 1.0        # pause before the first retry
+      backoff_factor: 2.0        # each further retry waits this many times longer
+      backoff_max_s: 60.0        # longest pause, a server's Retry-After included
+    postgres:
+      statement_timeout_ms: 60000  # statement_timeout of the read-only transaction
+      connect_timeout_s: 10.0
+      fetch_rows: 5000           # rows fetched per round trip
+    mysql:                       # MySQL and MariaDB Sources; needs lorebase-scribe[mysql]
+      statement_timeout_ms: 60000  # max_execution_time (MariaDB: max_statement_time, seconds)
+      connect_timeout_s: 10.0
+      fetch_rows: 5000           # rows fetched per round trip
+    mssql:                       # SQL Server Sources; needs lorebase-scribe[mssql]
+      statement_timeout_ms: 60000  # query timeout and LOCK_TIMEOUT
+      connect_timeout_s: 10.0    # login timeout
+      fetch_rows: 5000           # rows fetched per round trip
+  extraction:                    # documents into reviewable Proposals (docs/extraction.md)
+    tiers: [0, 1]                # 0 rules, 1 local span and relation models, 2 the chat model
+                                 # of inference.llm; add 2 once a model is configured
+    auto_accept_threshold: 0.9   # items at or above are accepted at once (above 1: none)
+    min_confidence: 0.3          # weaker candidates are dropped
+    mode: doubts_only            # ingestion mode of Domains without their own: review_all
+                                 # (nothing accepted at once) or doubts_only; direct is refused
+                                 # here, a Domain's settings.extraction may choose it
+    domain_may_loosen: [mode]    # members a Domain may set looser than these (mode,
+                                 # auto_accept_threshold, min_confidence); []: none
+    direct_merge_protected: true # direct-mode jobs may merge into a protected branch (waives
+                                 # required_approvals, not steward or role rules); false:
+                                 # their Proposals wait for approvals
+    new_record_kinds: null       # Kinds that may get new Records; null: every natural-key Kind
+    value_cue_words: 8           # a rule-found value needs a cue word this close before it
+    max_items_per_job: 5000
+    max_document_chars: 2000000  # parsed text beyond this is not extracted
+    prompt_version: extract-v1   # recorded in Lineage and the cache key; bump with prompts
+    cache: true                  # reuse tier 2 answers for unchanged chunk, schema and model
+    max_tokens_per_job: 2000000  # tier 2 stops after this many tokens; 0: no limit
+    versions:                    # evidence check of new document versions and retirements
+      max_values_per_job: 5000   # values one document_version_check job looks at; the rest
+                                 # goes to a continuation job
+    parser:                      # PDF and DOCX parsed in a child process without network
+      isolated: true             # false: in a worker thread, bounded by max_input_bytes only
+      timeout_s: 60.0            # wall-clock time per document
+      cpu_s: 60                  # CPU seconds (RLIMIT_CPU)
+      memory_mb: 1024            # address space in MiB (RLIMIT_AS, where enforced)
+      max_input_bytes: 52428800  # larger documents are not parsed
+    chunking:
+      max_chars: 2000            # largest chunk of parsed text
+      overlap_chars: 200         # repeated from the previous chunk (< max_chars / 2)
+    matching:                    # entity resolution against existing Records
+      trigram_threshold: 0.45    # least trigram similarity of a fuzzy title match
+      match_threshold: 0.6       # least score of a match; below: new Record or dropped
+      ambiguity_margin: 0.05     # candidates this close to the best make the match ambiguous
+      candidates: 5              # candidates kept per mention
+      dictionary_max_titles: 20000   # titles loaded per job for dictionary matching
+      min_title_chars: 4         # shorter titles are not matched by dictionary
+    confidence:                  # confidence given by each technique
+      key: 1.0                   # a key found by its pattern
+      title: 0.95                # an exact title
+      normalized_title: 0.9      # a title equal after case and punctuation folding
+      value_max: 0.85            # ceiling of rule-found values
+      cooccurrence_max: 0.7      # ceiling of Links from co-occurrence in a sentence
+      heading: 0.6               # Links between a heading's Record and those of its section
+      tier2: 0.8                 # facts from the chat model with verified evidence
+    discovery:                   # schema suggestions: what the tiers see outside the schema
+      enabled: true
+      rules: true                # tier 0: **Label:** fields, table columns, headings with codes
+      span_labels: []            # tier 1: extra span labels suggesting Kinds, e.g. [certificate]
+      relation_labels: []        # tier 1: extra relation labels suggesting Relations
+      tier2: true                # tier 2: the model lists `unlisted` facts (verified evidence)
+      llm_pass: false            # a dedicated call per chunk through the schema_discovery route
+      llm_max_items: 20          # proposals of each list that call may return
+      llm_max_tokens: 200000     # token cap of that pass per job (0: none); apart from max_tokens_per_job
+      llm_max_quote_chars: 300   # proposals quoting more are discarded
+      llm_max_quote_share: 0.5   # ... or quoting more than this share of the chunk
+      llm_quote_share_min_chunk_chars: 400   # ... of chunks at least this long
+      min_confidence: 0.3        # weaker observations are dropped
+      field_confidence: 0.6      # a field line or table column
+      heading_confidence: 0.5    # a Kind named by a heading
+      max_value_chars: 120       # sample values are cut to this length
+      vault_match_max_words: 12  # longest quote word sequence compared with vault fingerprints
+      vault_match_max_text_words: 400   # longer quotes are not compared: evidence withheld
+      vault_match_max_text_chars: 4000  # same, by characters
+      vault_match_max_candidates: 200000  # word sequences compared per job; past it, withheld
+      max_observations_per_job: 1000
+  embeddings:                    # embedding jobs (design 9.3); model: inference.embeddings
+    page_rows: 500               # Record rows read and rendered per query
+    batch_texts: 64              # texts per call of the embedding model
+    max_records_per_job: 20000   # rows one job reads; the rest goes to a continuation job
+    max_calls_per_second: 0.0    # model calls per second of one job; 0: no limit
+    max_text_chars: 8000         # rendered texts are cut to this length before hashing
+    template_cache_size: 64      # schemas whose resolved templates are kept, by schema hash
+    retry:                       # retries of a failed call, after the provider's own retries
+      attempts: 2                # attempts per call, the first included
+      backoff_s: 2.0             # pause before the first retry; doubles each time
+      backoff_max_s: 60.0        # longest pause
+  # Consolidation of resolution misses into vocabulary suggestions (design 8.10), also run by
+  # `lorebase-scribe consolidate DOMAIN`. Suggestions are reviewed like any other; nothing
+  # changes the schema without an accepted Proposal.
+  consolidation:
+    min_misses: 3                # misses a phrase needs before it is considered
+    min_callers: 2               # distinct callers it needs (1 for a single-agent installation)
+    max_phrases: 200             # phrases per pass, the most missed first
+    value_similarity: 0.4        # least trigram similarity to an indexed value (value alias)
+    name_similarity: 0.75        # least name similarity to a Kind or Attribute (alias)
+    values_per_phrase: 3
+    llm:                         # optional description proposals, task schema_consolidation;
+      enabled: false             # the model sees names and missed phrases, never values
+      min_misses: 10
+      max_attributes: 5
+      max_phrases: 20
+      max_description_chars: 500
+      max_tokens_per_pass: 20000
+  audit_checkpoints:             # signed heads of the audit chains published outside the
+                                 # database; `python -m lorebase_keeper audit verify
+                                 # --checkpoints` then detects entries cut from a chain's end
+    enabled: false
+    interval_s: 3600.0           # newer entries are not covered until the next checkpoint
+    streams: [actions, reads]    # audit_log and audit_read_log
+    signing_key: null            # Ed25519 PEM, e.g. secret://file//run/secrets/checkpoint.pem
+                                 # (openssl genpkey -algorithm ed25519); verifiers need only
+                                 # the public key (openssl pkey -pubout)
+    key_id: main                 # recorded in each checkpoint
+    prefix: lorebase-audit/      # object names: {prefix}{stream}/{UTC time}.json
+    sink: file                   # file | http | s3
+    directory: null              # file: a directory the database host cannot write
+    http:                        # http: PUT or POST of each checkpoint
+      url: null                  # {name} is replaced by the object name
+      method: PUT
+      headers: {}                # values may be secret references
+      allowed_schemes: [https]
+      allow_private_targets: false   # off: global unicast addresses only, pinned, no redirects
+      timeout_s: 10.0
+    s3:                          # s3: PUT signed with Signature Version 4; use a bucket with
+                                 # versioning or object lock and PutObject-only credentials
+      endpoint: null             # e.g. https://s3.eu-west-1.amazonaws.com
+      bucket: null
+      region: us-east-1
+      path_style: true           # endpoint/bucket/key; false: bucket.endpoint/key
+      access_key_id: null        # secret references, e.g. secret://env/CHECKPOINT_KEY_ID
+      secret_access_key: null
+      session_token: null
+      allowed_schemes: [https]
+      allow_private_targets: false
+      timeout_s: 10.0
+  reconciliation:                # contradictions between Sources (design 10.6); a Domain
+                                 # overrides any member in its `reconciliation` setting
+    enabled: true                # false: no candidate is raised
+    stages: [identity, values, normalize, semantic]   # run in this order; leave one out to
+                                 # disable it
+    hold_auto_accept: true       # extraction items raising a contradiction stay pending
+    sweep_interval_s: 0.0        # scheduled sweep of every Domain; 0 disables it
+    sweep_max_changes_per_job: 50000   # history changes one sweep job reads; then a continuation
+    max_claims_per_candidate: 20 # newest claims kept per candidate; the others are counted
+    merge_check: warn            # Proposal check of open candidates on the Proposals Scribe
+                                 # merges: off, warn or block; the stricter of this and the
+                                 # Domain reconciliation_check applies (off < warn < block), so
+                                 # a Domain can tighten it, never loosen it
+    triggers:
+      extraction: true           # check extraction value items while they are assembled
+      source_sync: true          # check a Source sync's changes before they are merged
+      document_versions: true    # check evidence quotes when a document gets a new version
+                                 # or is retired (stale candidates, signal evidence_gone)
+    duplicates:
+      trigram_threshold: 0.8     # least title similarity of a duplicate candidate
+      max_pairs_per_kind: 1000   # duplicate pairs examined per Kind and pass
+    normalize:                   # string and text values; never changes a stored value
+      units_file: null           # YAML table of units replacing the one shipped with lorebase_core
+      numeric_tolerance: 0.0     # relative difference under which numbers are equal
+      max_quantity_length: 64    # longer values are not read as a number and a unit
+      negation_words: [not, "no", never, without]   # equal without them: marked negation
+    semantic:                    # embeddings of competing text values (needs inference.embeddings)
+      enabled: false             # true also needs the stage in `stages`
+      equivalence_threshold: null   # similarity above which paraphrases are not raised; null: all
+      equivalent_similarity: 0.9 # least similarity of text values marked equivalent (ranked last)
+      duplicate_threshold: 0.92  # least similarity of stored Record vectors for a duplicate
+      judge: false               # ask the chat model whether two texts contradict
+    stale:
+      max_age: null              # ISO 8601 duration (e.g. P30D); null: off. Per Kind and
+                                 # Attribute in the Domain settings
+      source_unseen: true        # raise Records an incremental Source has not read within its
+                                 # stale_after (a Source setting in the schema; null there: off)

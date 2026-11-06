@@ -1,0 +1,704 @@
+# Copy of deploy/compose/docker-compose.yaml at lorebase v0.3.1 (scripts/lorebase-up.sh sync): do not edit; change LOREBASE_VERSION and run sync.
+# Lorebase on docker compose. Run from the repository root:
+#
+#   cp .env.example .env              # then edit the values marked "change me"
+#   docker compose --env-file .env -f deploy/compose/docker-compose.yaml up -d
+#
+# The default services are Postgres, the migrations, Keeper and the web app (http://127.0.0.1:8090,
+# LOREBASE_WEB_PORT), which proxies /api/ to Keeper on the compose network.
+#
+# Optional profiles (add --profile NAME, repeatable):
+#   local-models   Ollama with the model named by OLLAMA_MODEL pulled at start, and a one-shot
+#                  `inference-check` that probes it through the application's own client
+#   litellm        LiteLLM proxy in front of hosted providers (docs/inference-providers.md)
+#   assistant      Guide, the optional exploration assistant (embeddings and chat over Keeper reads;
+#                  needs a model endpoint, see LLM_* in .env.example). Together with Scribe it
+#                  runs on the backend-ml image (fastembed and a small embedding model).
+#                  `make up PROFILES=assistant` starts it with the overlay assistant.yaml
+#   mcp            Herald, the MCP server, over Streamable HTTP on 127.0.0.1:8091/mcp
+#                  (HERALD_HOST_PORT); `make up PROFILES=mcp` starts it with the default services
+#   observability  OpenTelemetry Collector, Prometheus, Grafana, Jaeger
+#   scale-out      second Keeper, Postgres streaming replica, nginx in front of the Keepers
+#                  (set KEEPER_RATE_LIMIT_BACKEND=postgres so both Keepers share their rate
+#                  limits, and LOREBASE_DB_READ_DSN and KEEPER_PREFER_REPLICA to route reads to
+#                  the replica; see docs/deployment.md)
+#
+# Every value comes from the environment file; see .env.example for the full list.
+
+name: lorebase
+
+# Images are built from this checkout on every `up` (pull_policy build; unchanged layers come
+# from the cache), so a stale local image with the same tag never runs against newer
+# migrations. To run prebuilt images from a registry instead, set LOREBASE_IMAGE,
+# LOREBASE_ML_IMAGE, LOREBASE_WEB_IMAGE and LOREBASE_TAG to them and LOREBASE_PULL_POLICY to
+# missing (or always).
+x-backend: &backend
+  image: ${LOREBASE_IMAGE:-lorebase}:${LOREBASE_TAG:-dev}
+  pull_policy: ${LOREBASE_PULL_POLICY:-build}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/backend.Dockerfile
+    args:
+      UV_SYNC_ARGS: ${UV_SYNC_ARGS:-}
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+# Image of the services that embed text (Scribe, Guide): the backend image plus fastembed and a
+# pre-downloaded embedding model, target `backend-ml` of the same Dockerfile (about 390 MB more
+# than the backend image). The model is baked in, so embeddings work offline with the read-only
+# root file system; EMBEDDING_MODEL names it (empty: none baked, then set
+# inference.embeddings.cache_dir to a writable volume and the model downloads on first use).
+x-backend-ml: &backend-ml
+  <<: *backend
+  image: ${LOREBASE_ML_IMAGE:-lorebase-ml}:${LOREBASE_TAG:-dev}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/backend.Dockerfile
+    target: backend-ml
+    args:
+      UV_SYNC_ARGS: ${UV_SYNC_ARGS:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL-BAAI/bge-small-en-v1.5}
+
+x-database: &database
+  # The connection string is passed as a secret reference (design 16): the value of
+  # LOREBASE_DB_DSN is read from the environment and never written to the YAML or the logs.
+  # Keeper and Scribe connect as the application role (LOREBASE_APP_USER, kept by `db-roles`):
+  # no superuser, no BYPASSRLS, so row-level security applies to them (design 13.3).
+  LOREBASE__DATABASE__DSN: secret://env/LOREBASE_DB_DSN
+  LOREBASE_DB_DSN: postgresql+asyncpg://${LOREBASE_APP_USER:-lorebase_app}:${LOREBASE_APP_PASSWORD:?set LOREBASE_APP_PASSWORD in the environment file}@postgres:5432/${POSTGRES_DB:-lorebase}
+  # Read replicas (design 15.3); empty keeps every read on the primary. Use the application
+  # role here too (see .env.example).
+  LOREBASE_DB_READ_DSN: ${LOREBASE_DB_READ_DSN:-}
+  # Maintenance role for per-Attribute index DDL run by the job worker (Scribe, or
+  # `python -m lorebase_store.jobs work`): the owner of the tables, here the Postgres superuser
+  # of the stack, which also runs the migrations. In production point it at a dedicated role
+  # that owns mat_records, or leave it unset and apply `python -m lorebase_store.indexes plan`
+  # (docs/store-schema-notes.md).
+  LOREBASE__DATABASE__MAINTENANCE_DSN: secret://env/LOREBASE_DB_MAINTENANCE_DSN
+  LOREBASE_DB_MAINTENANCE_DSN: ${LOREBASE_DB_MAINTENANCE_DSN:-postgresql+asyncpg://${POSTGRES_USER:-lorebase}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment file}@postgres:5432/${POSTGRES_DB:-lorebase}}
+  # Storage profile (store.storage.profile: compact, balanced or fast; docs/performance.md#storage-profiles).
+  LOREBASE__STORE__STORAGE__PROFILE: ${LOREBASE_STORAGE_PROFILE:-balanced}
+
+# Key that seals webhook signing keys in the database (webhooks.encryption_key); Keeper and
+# Scribe need the same value. Passed as a secret reference like the DSN; `make env` generates it.
+x-webhooks: &webhooks
+  LOREBASE__WEBHOOKS__ENCRYPTION_KEY: secret://env/LOREBASE_WEBHOOK_KEY
+  LOREBASE_WEBHOOK_KEY: ${LOREBASE_WEBHOOK_KEY:?set LOREBASE_WEBHOOK_KEY in the environment file}
+
+# Guard of a profile that needs a secret (require-secrets.sh): exits 1, naming the variable,
+# when a value is empty, still `change-me`, or too short. `${VAR:?}` cannot be used for these,
+# because compose interpolates every service whether its profile is enabled or not.
+x-require-secrets: &require-secrets
+  image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f}
+  restart: "no"
+  user: postgres
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  entrypoint: ["sh", "/scripts/require-secrets.sh"]
+  volumes:
+    - ./require-secrets.sh:/scripts/require-secrets.sh:ro
+
+# Model endpoint seen by services that call models (Scribe, inference-check). LLM_BASE_URL
+# defaults to the Ollama service of the `local-models` profile, reached by its compose service
+# name; set LLM_BASE_URL, LLM_MODEL and LLM_API_KEY in the environment file to use a hosted
+# endpoint or the LiteLLM proxy instead (design 9.4). An empty LLM_API_KEY means no key.
+# Those services also resolve host.docker.internal (extra_hosts), so a model server running on
+# the host is reachable at http://host.docker.internal:11434/v1 on Linux as on Docker Desktop.
+x-inference: &inference
+  LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+  LLM_MODEL: ${LLM_MODEL:-${OLLAMA_MODEL:-qwen2.5:7b-instruct}}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+
+x-keeper: &keeper
+  <<: *backend
+  command: ["python", "-m", "lorebase_keeper"]
+  read_only: true
+  tmpfs:
+    - /tmp
+  environment:
+    <<: [*database, *webhooks]
+    LOREBASE_CONFIG: /etc/lorebase/lorebase.yaml
+    LOREBASE__KEEPER__HOST: 0.0.0.0
+    # The container listens on all its interfaces so that the published port works; with the
+    # example configuration (auth.mode none) Keeper refuses that unless this flag is set. Only
+    # safe while KEEPER_BIND keeps the port on 127.0.0.1: set it to false and choose an auth
+    # mode before publishing Keeper anywhere else.
+    LOREBASE__KEEPER__AUTH__ALLOW_INSECURE: ${KEEPER_ALLOW_INSECURE:-true}
+    LOREBASE__KEEPER__PORT: ${KEEPER_PORT:-8080}
+    LOREBASE__KEEPER__READS__PREFER_REPLICA: ${KEEPER_PREFER_REPLICA:-false}
+    # Rate limit buckets: local (per Keeper) or postgres (shared; set it with scale-out).
+    LOREBASE__KEEPER__LIMITS__RATE__BACKEND: ${KEEPER_RATE_LIMIT_BACKEND:-local}
+    LOREBASE__LOGGING__LEVEL: ${LOG_LEVEL:-INFO}
+    LOREBASE__TELEMETRY__OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+    LOREBASE__TELEMETRY__SERVICE_NAME: lorebase-keeper
+    LOREBASE__TELEMETRY__SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-0.1}
+    # Keeper settings passed through from the environment file (or the shell) when set there,
+    # under their own names; left unset, the YAML file above decides. See .env.example.
+    LOREBASE__KEEPER__AUTH__MODE:
+    LOREBASE__KEEPER__PROPOSALS__ALLOW_SELF_APPROVAL:
+    LOREBASE__KEEPER__PROPOSALS__REQUIRED_APPROVALS:
+    LOREBASE__KEEPER__OPERATIONS__DIRECT_COMMIT_ON_PROTECTED:
+    LOREBASE__KEEPER__CORS__ALLOW_ORIGINS:
+    LOREBASE__KEEPER__CORS__ALLOW_HEADERS:
+    LOREBASE__KEEPER__CORS__EXPOSE_HEADERS:
+    LOREBASE__KEEPER__CORS__ALLOW_CREDENTIALS:
+  volumes:
+    - ${LOREBASE_CONFIG_FILE:-../../config/lorebase.example.yaml}:/etc/lorebase/lorebase.yaml:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${KEEPER_PORT:-8080}/readyz', timeout=3)"
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 10s
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f}
+    restart: unless-stopped
+    # Memory settings per storage profile: see .env.example and docs/performance.md#sizing.
+    # The defaults are those of Postgres. pg_prewarm in POSTGRES_PRELOAD_LIBRARIES turns on
+    # autoprewarm, which reloads the cached pages after a restart.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-4GB}
+      - -c
+      - huge_pages=${POSTGRES_HUGE_PAGES:-try}
+      - -c
+      - shared_preload_libraries=${POSTGRES_PRELOAD_LIBRARIES:-}
+    shm_size: ${POSTGRES_SHM_SIZE:-256m}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lorebase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment file}
+      POSTGRES_DB: ${POSTGRES_DB:-lorebase}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # Creates or updates the application role on every start (postgres/app-role.sh). It is
+  # idempotent, so a volume created before the role existed gets it too.
+  db-roles:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f}
+    restart: "no"
+    user: postgres
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    entrypoint: ["sh", "/scripts/app-role.sh"]
+    environment:
+      PGHOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-lorebase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment file}
+      POSTGRES_DB: ${POSTGRES_DB:-lorebase}
+      APP_USER: ${LOREBASE_APP_USER:-lorebase_app}
+      APP_PASSWORD: ${LOREBASE_APP_PASSWORD:?set LOREBASE_APP_PASSWORD in the environment file}
+    volumes:
+      - ./postgres/app-role.sh:/scripts/app-role.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    <<: *backend
+    restart: "no"
+    # Alembic reads alembic.ini from the working directory; the store sources, with their
+    # migration scripts, are copied to this path in the image.
+    working_dir: ${MIGRATIONS_DIR:-/opt/lorebase/store}
+    command: ["alembic", "upgrade", "head"]
+    # Migrations run as the owner role; revision 0005 grants the application role EXECUTE on
+    # the security definer read functions (database.application_role).
+    environment:
+      LOREBASE__DATABASE__DSN: secret://env/LOREBASE_DB_DSN
+      LOREBASE_DB_DSN: postgresql+asyncpg://${POSTGRES_USER:-lorebase}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment file}@postgres:5432/${POSTGRES_DB:-lorebase}
+      LOREBASE__DATABASE__APPLICATION_ROLE: ${LOREBASE_APP_USER:-lorebase_app}
+      LOREBASE__STORE__STORAGE__PROFILE: ${LOREBASE_STORAGE_PROFILE:-balanced}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
+
+  # Brings the database in line with the storage profile after LOREBASE_STORAGE_PROFILE
+  # changed; batched and resumable, reads go on (docs/performance.md#storage-profiles):
+  #   docker compose --profile maintenance run --rm storage apply [--compact]
+  #   docker compose --profile maintenance run --rm storage status | prewarm
+  storage:
+    <<: *backend
+    restart: "no"
+    profiles: [maintenance]
+    entrypoint: ["python", "-m", "lorebase_store.storage"]
+    command: ["status"]
+    environment:
+      LOREBASE__DATABASE__DSN: secret://env/LOREBASE_DB_DSN
+      LOREBASE_DB_DSN: postgresql+asyncpg://${POSTGRES_USER:-lorebase}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment file}@postgres:5432/${POSTGRES_DB:-lorebase}
+      LOREBASE__STORE__STORAGE__PROFILE: ${LOREBASE_STORAGE_PROFILE:-balanced}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  keeper:
+    <<: *keeper
+    ports:
+      - "${KEEPER_BIND:-127.0.0.1}:${KEEPER_HOST_PORT:-8080}:${KEEPER_PORT:-8080}"
+
+  # The web app (apps/web), built from deploy/docker/web.Dockerfile. nginx serves the app and
+  # forwards /api/ to Keeper (and /guide/ to Guide, profile assistant; web/proxy.conf.template),
+  # so the browser talks to one origin and Keeper needs no CORS setting. The app runs in live mode
+  # against that origin; there is no sign-in while Keeper runs with auth mode none. Session mode
+  # (WEB_AUTH_MODE=session) needs auth.sessions on Keeper, see docs/deployment.md; the overlay
+  # oidc-mock.yaml sets it up against a mock provider for a local try.
+  web:
+    image: ${LOREBASE_WEB_IMAGE:-lorebase-web}:${LOREBASE_TAG:-dev}
+    pull_policy: ${LOREBASE_PULL_POLICY:-build}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/web.Dockerfile
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      VITE_API_MODE: live
+      VITE_KEEPER_BASE_URL: /
+      # /guide with the assistant profile; empty leaves the assistant out of the app.
+      VITE_GUIDE_URL: ${WEB_GUIDE_URL:-}
+      VITE_AUTH_MODE: ${WEB_AUTH_MODE:-token}
+      NGINX_ENVSUBST_FILTER: ^LOREBASE_WEB_PROXY_
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx/conf.d/lorebase.d
+      LOREBASE_WEB_PROXY_KEEPER_PORT: ${KEEPER_PORT:-8080}
+      LOREBASE_WEB_PROXY_GUIDE_PORT: ${GUIDE_PORT:-8095}
+      LOREBASE_WEB_PROXY_MAX_BODY: ${WEB_PROXY_MAX_BODY:-25m}
+      LOREBASE_WEB_PROXY_CONNECT_TIMEOUT: ${WEB_PROXY_CONNECT_TIMEOUT:-3s}
+      LOREBASE_WEB_PROXY_READ_TIMEOUT: ${WEB_PROXY_READ_TIMEOUT:-300s}
+      LOREBASE_WEB_HSTS: ${WEB_HSTS:-}
+    volumes:
+      - ./web/proxy.conf.template:/etc/nginx/templates/proxy.conf.template:ro
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${LOREBASE_WEB_PORT:-8090}:8080"
+    depends_on:
+      keeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  # Scribe (docs/scribe.md): job worker and scheduler. Replicas are safe: jobs are claimed with
+  # SKIP LOCKED and one process at a time schedules. CSV Sources read files under
+  # /data/sources; the supply example data is mounted there read-only for development.
+  scribe:
+    <<: *backend-ml
+    command: ["lorebase-scribe"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: ${SCRIBE_STOP_GRACE:-45s}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      <<: [*database, *inference, *webhooks]
+      LOREBASE_CONFIG: /etc/lorebase/lorebase.yaml
+      LOREBASE__LOGGING__LEVEL: ${LOG_LEVEL:-INFO}
+      LOREBASE__TELEMETRY__OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      LOREBASE__TELEMETRY__SERVICE_NAME: lorebase-scribe
+      LOREBASE__TELEMETRY__SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-0.1}
+      LOREBASE__SCRIBE__WORKER__CONCURRENCY: ${SCRIBE_CONCURRENCY:-2}
+      # The job loop rewrites this file every scribe.worker.liveness_interval_s (10 s) with its
+      # live slots; the healthcheck below reads it, so a process that hangs, or runs no slot,
+      # shows unhealthy instead of running on with a growing queue.
+      LOREBASE__SCRIBE__WORKER__LIVENESS_FILE: /tmp/scribe-liveness.json
+      LOREBASE__SCRIBE__SOURCES__CSV__ALLOWED_ROOTS: '["/data/sources"]'
+      # The only references a Source `connection` may name (scribe.sources.allowed_connections).
+      LOREBASE__SCRIBE__SOURCES__ALLOWED_CONNECTIONS: '["secret://env/SUPPLY_APPROVED_SUPPLIERS_CSV", "secret://env/ERP_DSN"]'
+      # Secret values behind the `connection` references of the example Sources.
+      SUPPLY_APPROVED_SUPPLIERS_CSV: ${SUPPLY_APPROVED_SUPPLIERS_CSV:-/data/sources/supply/supplier.csv}
+      ERP_DSN: ${ERP_DSN:-}
+    volumes:
+      - ${LOREBASE_CONFIG_FILE:-../../config/lorebase.example.yaml}:/etc/lorebase/lorebase.yaml:ro
+      - ${SCRIBE_SOURCES_DIR:-../../examples/supply/data}:/data/sources/supply:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Scribe serves no HTTP: the check reads the liveness file (stale after three intervals, or
+    # without a live slot, it fails; the module imports the standard library only).
+    healthcheck:
+      test: ["CMD", "python", "-m", "lorebase_scribe.liveness", "/tmp/scribe-liveness.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ---- profile assistant ----------------------------------------------------------------
+  # Guide: holds no Keeper credential, it forwards the caller's own Authorization or session
+  # cookie to Keeper. Embeddings default to fastembed, which the backend-ml image carries
+  # (or set inference.embeddings.provider: openai_compatible).
+  # `make up PROFILES=assistant` (scripts/quickstart.sh) starts this profile with Scribe and the
+  # overlay assistant.yaml, which points the web app at it.
+
+  guide:
+    <<: *backend-ml
+    profiles: [assistant]
+    command: ["lorebase-guide"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *inference
+      LOREBASE_CONFIG: /etc/lorebase/lorebase.yaml
+      LOREBASE__GUIDE__HOST: 0.0.0.0
+      LOREBASE__GUIDE__PORT: ${GUIDE_PORT:-8095}
+      # Writable state (structured output mode memory) on the guide-data volume; the root file
+      # system stays read-only.
+      LOREBASE__GUIDE__DATA_DIR: /var/lib/lorebase/guide
+      LOREBASE__GUIDE__KEEPER__BASE_URL: http://keeper:${KEEPER_PORT:-8080}
+      LOREBASE__GUIDE__HTTP__ALLOWED_ORIGINS: ${GUIDE_ALLOWED_ORIGINS:-["http://127.0.0.1:${LOREBASE_WEB_PORT:-8090}","http://localhost:${LOREBASE_WEB_PORT:-8090}"]}
+      # The web service's origins, used when GUIDE_ALLOWED_ORIGINS is an empty list ([]).
+      LOREBASE__GUIDE__HTTP__DEFAULT_ORIGINS: '["http://127.0.0.1:${LOREBASE_WEB_PORT:-8090}","http://localhost:${LOREBASE_WEB_PORT:-8090}"]'
+      LOREBASE__GUIDE__HTTP__ALLOW_ANONYMOUS: ${GUIDE_ALLOW_ANONYMOUS:-false}
+      LOREBASE__LOGGING__LEVEL: ${LOG_LEVEL:-INFO}
+      LOREBASE__TELEMETRY__OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      LOREBASE__TELEMETRY__SERVICE_NAME: lorebase-guide
+      LOREBASE__TELEMETRY__SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-0.1}
+    volumes:
+      - ${LOREBASE_CONFIG_FILE:-../../config/lorebase.example.yaml}:/etc/lorebase/lorebase.yaml:ro
+      - guide-data:/var/lib/lorebase/guide
+    ports:
+      - "${GUIDE_BIND:-127.0.0.1}:${GUIDE_HOST_PORT:-8095}:${GUIDE_PORT:-8095}"
+    depends_on:
+      keeper:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${GUIDE_PORT:-8095}/readyz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ---- profile mcp ----------------------------------------------------------------------
+  # Herald, the MCP server, over Streamable HTTP at http://127.0.0.1:HERALD_HOST_PORT/mcp (and
+  # http://herald:HERALD_PORT/mcp from other containers of the stack). It holds no Keeper
+  # credential: each caller sends `Authorization: Bearer <api key>`, forwarded to Keeper.
+  # HERALD_ALLOW_ANONYMOUS=true lets calls without one through to Keeper, which accepts them only
+  # in auth mode none (the example configuration): local stacks only (docs/mcp.md).
+  # `make up PROFILES=mcp` starts it with the default services.
+
+  herald:
+    <<: *backend
+    profiles: [mcp]
+    command: ["lorebase-herald"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      LOREBASE_CONFIG: /etc/lorebase/lorebase.yaml
+      LOREBASE__HERALD__TRANSPORT: streamable_http
+      LOREBASE__HERALD__HTTP__HOST: 0.0.0.0
+      LOREBASE__HERALD__HTTP__PORT: ${HERALD_PORT:-8090}
+      # DNS rebinding protection: Host and Origin values accepted (":*" matches any port).
+      LOREBASE__HERALD__HTTP__ALLOWED_HOSTS: ${HERALD_ALLOWED_HOSTS:-["127.0.0.1:*","localhost:*","herald:*"]}
+      LOREBASE__HERALD__HTTP__ALLOWED_ORIGINS: ${HERALD_ALLOWED_ORIGINS:-["http://127.0.0.1:*","http://localhost:*"]}
+      LOREBASE__HERALD__HTTP__ALLOW_ANONYMOUS: ${HERALD_ALLOW_ANONYMOUS:-false}
+      LOREBASE_URL: http://keeper:${KEEPER_PORT:-8080}
+      # Domain and branch used when a call names none; empty: the call must name the Domain.
+      LOREBASE_DOMAIN: ${HERALD_DOMAIN:-}
+      LOREBASE_BRANCH: ${HERALD_BRANCH:-}
+      LOREBASE__LOGGING__LEVEL: ${LOG_LEVEL:-INFO}
+      LOREBASE__TELEMETRY__OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      LOREBASE__TELEMETRY__SERVICE_NAME: lorebase-herald
+      LOREBASE__TELEMETRY__SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-0.1}
+    volumes:
+      - ${LOREBASE_CONFIG_FILE:-../../config/lorebase.example.yaml}:/etc/lorebase/lorebase.yaml:ro
+    ports:
+      # Host port 8091 by default: 8090 is the web app's.
+      - "${HERALD_BIND:-127.0.0.1}:${HERALD_HOST_PORT:-8091}:${HERALD_PORT:-8090}"
+    depends_on:
+      keeper:
+        condition: service_healthy
+    # Herald serves only the MCP endpoint (no health route): the check opens its port.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', ${HERALD_PORT:-8090}), timeout=3).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ---- profile local-models -------------------------------------------------------------
+
+  ollama:
+    profiles: [local-models]
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.15@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761}
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "${OLLAMA_BIND:-127.0.0.1}:${OLLAMA_HOST_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  ollama-pull:
+    profiles: [local-models]
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.15@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761}
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  # One-shot probe: sends a tiny prompt through lorebase_inference to LLM_BASE_URL and prints
+  # model, latency and token counts. Run it from the repository root with
+  #   docker compose --env-file .env -f deploy/compose/docker-compose.yaml \
+  #     --profile local-models run --rm inference-check
+  # and add --no-deps when LLM_BASE_URL points at a model server outside this stack.
+  # Embeddings are skipped: the default fastembed provider is in the backend-ml image only
+  # (see docs/inference-providers.md).
+  inference-check:
+    <<: *backend
+    profiles: [local-models]
+    restart: "no"
+    command: ["python", "-m", "lorebase_inference", "check", "--no-embeddings"]
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *inference
+      LOREBASE_CONFIG: /etc/lorebase/lorebase.yaml
+      LOREBASE__LOGGING__LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${LOREBASE_CONFIG_FILE:-../../config/lorebase.example.yaml}:/etc/lorebase/lorebase.yaml:ro
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+
+  # ---- profile litellm ------------------------------------------------------------------
+
+  litellm-secrets:
+    <<: *require-secrets
+    profiles: [litellm]
+    command: ["LITELLM_MASTER_KEY"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+
+  litellm:
+    profiles: [litellm]
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.83.14-stable.patch.3@sha256:f12d528d4a05add56cb09e54c5126088f2edc6bdf3a2f943bcd3a32b08769da2}
+    restart: unless-stopped
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "${LITELLM_PORT:-4000}"]
+    depends_on:
+      litellm-secrets:
+        condition: service_completed_successfully
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      LITELLM_UPSTREAM_MODEL: ${LITELLM_UPSTREAM_MODEL:-}
+      LITELLM_UPSTREAM_API_KEY: ${LITELLM_UPSTREAM_API_KEY:-}
+      LITELLM_SECONDARY_MODEL: ${LITELLM_SECONDARY_MODEL:-}
+      LITELLM_SECONDARY_API_KEY: ${LITELLM_SECONDARY_API_KEY:-}
+    volumes:
+      # litellm.yaml: one provider. litellm.two-providers.yaml: primary with fallback.
+      - ${LITELLM_CONFIG_FILE:-./litellm.yaml}:/etc/litellm/config.yaml:ro
+    ports:
+      - "${LITELLM_BIND:-127.0.0.1}:${LITELLM_HOST_PORT:-4000}:${LITELLM_PORT:-4000}"
+
+  # ---- profile observability ------------------------------------------------------------
+
+  otel-collector:
+    profiles: [observability]
+    image: ${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b}
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ../observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${OTEL_BIND:-127.0.0.1}:${OTEL_GRPC_HOST_PORT:-4317}:4317"
+      - "${OTEL_BIND:-127.0.0.1}:${OTEL_HTTP_HOST_PORT:-4318}:4318"
+    depends_on:
+      - jaeger
+
+  jaeger:
+    profiles: [observability]
+    image: ${JAEGER_IMAGE:-jaegertracing/all-in-one:1.76.0@sha256:ab6f1a1f0fb49ea08bcd19f6b84f6081d0d44b364b6de148e1798eb5816bacac}
+    restart: unless-stopped
+    ports:
+      - "${JAEGER_BIND:-127.0.0.1}:${JAEGER_UI_HOST_PORT:-16686}:16686"
+
+  prometheus:
+    profiles: [observability]
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_BIND:-127.0.0.1}:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    depends_on:
+      - otel-collector
+
+  grafana-secrets:
+    <<: *require-secrets
+    profiles: [observability]
+    command: ["GRAFANA_ADMIN_PASSWORD"]
+    environment:
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+
+  grafana:
+    profiles: [observability]
+    image: ${GRAFANA_IMAGE:-grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205}
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_HOST_PORT:-3000}:3000"
+    depends_on:
+      grafana-secrets:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_started
+      jaeger:
+        condition: service_started
+
+  # ---- profile scale-out ----------------------------------------------------------------
+  # Stateless Keeper replicas behind a reverse proxy, and a Postgres streaming replica for
+  # reads. Writes keep going to the primary. The replica uses the official image plus two small
+  # scripts (postgres/): no extra image to maintain, the same pgvector build as the primary, and
+  # nothing beyond pg_basebackup, which ships with Postgres.
+
+  keeper-2:
+    <<: *keeper
+    profiles: [scale-out]
+
+  replica-prep:
+    profiles: [scale-out]
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f}
+    restart: "no"
+    user: root
+    entrypoint: ["sh", "/scripts/prepare-primary.sh"]
+    environment: &replication
+      PRIMARY_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-lorebase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment file}
+      POSTGRES_DB: ${POSTGRES_DB:-lorebase}
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-}
+      REPLICATION_SLOT: ${REPLICATION_SLOT:-lorebase_replica_1}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/prepare-primary.sh:/scripts/prepare-primary.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres-replica:
+    profiles: [scale-out]
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f}
+    restart: unless-stopped
+    user: postgres
+    entrypoint: ["sh", "/scripts/replica-entrypoint.sh"]
+    environment: *replication
+    volumes:
+      - postgres-replica-data:/var/lib/postgresql/data
+      - ./postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
+    ports:
+      - "${POSTGRES_REPLICA_BIND:-127.0.0.1}:${POSTGRES_REPLICA_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 20s
+    depends_on:
+      replica-prep:
+        condition: service_completed_successfully
+
+  proxy:
+    profiles: [scale-out]
+    image: ${PROXY_IMAGE:-nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      NGINX_ENVSUBST_FILTER: ^(KEEPER|PROXY)_
+      KEEPER_PORT: ${KEEPER_PORT:-8080}
+      PROXY_PORT: 8080
+      PROXY_MAX_BODY: ${PROXY_MAX_BODY:-2m}
+      PROXY_CONNECT_TIMEOUT: ${PROXY_CONNECT_TIMEOUT:-3s}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-60s}
+    volumes:
+      - ./proxy/keeper.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_HOST_PORT:-8088}:8080"
+    depends_on:
+      keeper:
+        condition: service_healthy
+      keeper-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  postgres-replica-data:
+  ollama-data:
+  guide-data:
+  prometheus-data:
+  grafana-data:
