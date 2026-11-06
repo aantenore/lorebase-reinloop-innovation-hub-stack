@@ -47,6 +47,8 @@ export interface SimConfig {
     proposalBranchPrefix: string;
     pollMs: number;
     reconnectMs: number;
+    /** How long the start waits for Lorebase (and its seed) before giving up; 0 waits forever. `LOREBASE_MAX_WAIT_MS` overrides it. */
+    maxWaitMs: number;
     /** Categories a Rule (policy) may have (the schema's enum). */
     ruleCategories: string[];
   };
@@ -132,6 +134,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
   cfg.lorebase.url = env.LOREBASE_URL ?? cfg.lorebase.url;
   cfg.lorebase.domain = env.LOREBASE_DOMAIN ?? cfg.lorebase.domain;
   cfg.lorebase.branch = env.LOREBASE_BRANCH ?? cfg.lorebase.branch;
+  cfg.lorebase.maxWaitMs = num(env.LOREBASE_MAX_WAIT_MS) ?? cfg.lorebase.maxWaitMs ?? 0;
   cfg.agents.maxTurns = num(env.SIM_MAX_TURNS) ?? cfg.agents.maxTurns;
   for (const t of ['opus', 'sonnet', 'haiku'] as const) {
     const v = env[`SIM_MODEL_${t.toUpperCase()}`];

@@ -27,6 +27,7 @@
     "proposalBranchPrefix": "policy/",
     "pollMs": 5000,
     "reconnectMs": 3000,
+    "maxWaitMs": 0,
     "repealOperation": "repeal_rule",
     "amendOperation": "amend_rule",
     "deleteOperation": "delete_rule",
