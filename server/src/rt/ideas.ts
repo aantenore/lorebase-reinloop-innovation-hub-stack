@@ -136,6 +136,12 @@ export interface IdeasConfig {
   /** A write refused with 429 or 5xx is retried up to `retries` times (backoff from `retryBaseMs`, Retry-After honoured). */
   retries: number;
   retryBaseMs: number;
+  /**
+   * A write still refused with 429 after the retries waits and is tried again from the step that failed, up to
+   * `requeues` times (backoff from `requeueBaseMs`, Retry-After honoured); later writes of the idea wait behind it.
+   */
+  requeues: number;
+  requeueBaseMs: number;
   committee: {
     /** The seeded group that decides on submitted ideas (it does not make joint plans). */
     groupName: string;
@@ -190,6 +196,11 @@ const ORDER: Record<IdeaStage, number> = { signal: 0, insight: 1, concept: 2, pr
 const clean = (v: unknown, max: number) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, max) : '');
 const slug = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'idea';
 const round1 = (n: number) => Math.round(n * 10) / 10;
+/** The wait before attempt `n + 1`: the Retry-After of the refusal when it has one, else exponential from `baseMs`. */
+const backoffMs = (err: unknown, baseMs: number, n: number) => {
+  const after = Number((err as LorebaseError).body && ((err as LorebaseError).body as Record<string, unknown>).retry_after_s);
+  return Number.isFinite(after) && after > 0 ? after * 1000 : baseMs * 2 ** n;
+};
 
 /** The stage an idea's fields justify: problem -> signal, + users -> insight, + solution -> concept, all six -> proposal. Pure. */
 export function stageFromFields(i: Pick<Idea, IdeaField>): IdeaStage {
@@ -421,17 +432,31 @@ export class IdeaBook {
     };
     const evidenceRec = evidence && evidenceRow(evidence, this.session);
     const prev = this.chains.get(i.code) ?? Promise.resolve();
+    const message = `Idea ${i.code}: ${i.stage}`;
+    const steps: (() => Promise<unknown>)[] = [
+      () => this.client.execute(this.cfg.writeOperation, { kind: this.cfg.kind, rows: [row] }, { branch: i.branch, message, idempotencyKey: randomUUID() }),
+    ];
+    if (reviewRow) steps.push(() => this.client.execute(this.cfg.writeOperation, { kind: this.cfg.reviewKind, rows: [reviewRow] }, { branch: i.branch, message: `Review of ${i.code} by ${review!.by}`, idempotencyKey: randomUUID() }));
+    if (evidenceRec) steps.push(() => this.client.execute(this.cfg.writeOperation, { kind: this.cfg.evidenceKind, rows: [evidenceRec] }, { branch: i.branch, message: `Evidence for ${i.code}: ${evidence!.type} by ${evidence!.collected_by}`, idempotencyKey: randomUUID() }));
+    if (after) steps.push(after);
     const next = prev.then(async () => {
-      try {
-        await this.retry(() => this.client.execute(this.cfg.writeOperation, { kind: this.cfg.kind, rows: [row] }, { branch: i.branch, message: `Idea ${i.code}: ${i.stage}`, idempotencyKey: randomUUID() }));
-        if (reviewRow) await this.retry(() => this.client.execute(this.cfg.writeOperation, { kind: this.cfg.reviewKind, rows: [reviewRow] }, { branch: i.branch, message: `Review of ${i.code} by ${review!.by}`, idempotencyKey: randomUUID() }));
-        if (evidenceRec) await this.retry(() => this.client.execute(this.cfg.writeOperation, { kind: this.cfg.evidenceKind, rows: [evidenceRec] }, { branch: i.branch, message: `Evidence for ${i.code}: ${evidence!.type} by ${evidence!.collected_by}`, idempotencyKey: randomUUID() }));
-        if (after) await this.retry(after);
-        this.writes++;
-        this.lastError = undefined;
-      } catch (err) {
-        this.lastError = err instanceof Error ? err.message : String(err);
-        console.warn(`[ideas] write of ${i.code} failed: ${this.lastError}`);
+      let done = 0;
+      for (let requeue = 0; ; requeue++) {
+        try {
+          for (; done < steps.length; done++) await this.retry(steps[done]);
+          this.writes++;
+          this.lastError = undefined;
+          return;
+        } catch (err) {
+          this.lastError = err instanceof Error ? err.message : String(err);
+          const limited = err instanceof LorebaseError && err.status === 429;
+          if (limited && requeue < this.cfg.requeues) {
+            await new Promise((r) => setTimeout(r, backoffMs(err, this.cfg.requeueBaseMs, requeue)));
+            continue;
+          }
+          console.warn(limited ? `[ideas] write of ${i.code} dropped after ${requeue} re-queues: ${this.lastError}` : `[ideas] write of ${i.code} failed: ${this.lastError}`);
+          return;
+        }
       }
     });
     this.chains.set(i.code, next);
@@ -446,8 +471,7 @@ export class IdeaBook {
       } catch (err) {
         const status = err instanceof LorebaseError ? err.status : 0;
         if (n >= this.cfg.retries || (status !== 429 && status < 500)) throw err;
-        const after = Number((err as LorebaseError).body && ((err as LorebaseError).body as Record<string, unknown>).retry_after_s);
-        await new Promise((r) => setTimeout(r, Number.isFinite(after) && after > 0 ? after * 1000 : this.cfg.retryBaseMs * 2 ** n));
+        await new Promise((r) => setTimeout(r, backoffMs(err, this.cfg.retryBaseMs, n)));
       }
     }
   }

@@ -694,6 +694,8 @@
     ],
     "retries": 6,
     "retryBaseMs": 1000,
+    "requeues": 5,
+    "requeueBaseMs": 10000,
     "committee": {
       "groupName": "Comitato Investimenti",
       "maxPerSession": 3,

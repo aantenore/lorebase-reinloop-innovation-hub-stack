@@ -1,0 +1,9 @@
+# Additions of the hub to the Lorebase compose file (deploy/compose/, a copy kept by `sync`), merged
+# over it by scripts/lorebase-up.sh. This file belongs to the hub: `sync` does not touch it.
+services:
+  keeper:
+    environment:
+      # Keeper settings passed through from the environment files (or the shell) when set there,
+      # under their own names; left unset, the YAML configuration decides.
+      LOREBASE__KEEPER__LIMITS__RATE__WRITES__REQUESTS_PER_MINUTE:
+      LOREBASE__KEEPER__LIMITS__RATE__WRITES__BURST:

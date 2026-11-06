@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { LorebaseClient } from '../lorebase/client.ts';
+import { type LorebaseClient, LorebaseError } from '../lorebase/client.ts';
 import { careerFor, Company } from './company.ts';
 import {
   aggregate, conflicted, exportMarkdown, filterIdeas, type IdeasConfig, IdeaBook, ideaFromRecord, ideaRow, sameScores, type Scores, scoresFrom, seesReviews, sourcesFrom,
@@ -9,7 +9,7 @@ import {
 
 const cfg: IdeasConfig = {
   enabled: true, kind: 'Idea', reviewKind: 'Review', evidenceKind: 'Evidence', evidenceMax: 3, writeOperation: 'import_records', branchPrefix: 'idea/', titleMaxChars: 90, textMaxChars: 500, tagsMax: 6,
-  tagMaxChars: 30, historyMax: 30, commentMaxChars: 280, perceiveMax: 6, signalsMax: 3, sourcesMax: 2, sourceTitleMaxChars: 20, retries: 0, retryBaseMs: 1, committee: { groupName: 'Comitato', maxPerSession: 3 },
+  tagMaxChars: 30, historyMax: 30, commentMaxChars: 280, perceiveMax: 6, signalsMax: 3, sourcesMax: 2, sourceTitleMaxChars: 20, retries: 0, retryBaseMs: 1, requeues: 0, requeueBaseMs: 1, committee: { groupName: 'Comitato', maxPerSession: 3 },
   policies: { conflictOfInterest: 'astensione_conflitto_interessi', independentReviews: 'revisioni_indipendenti', committeeNotAuthor: 'comitato_non_coautore', committeeAlternates: 'supplenti_comitato_per_anzianita', slotsExpire: 'slot_scadono_a_fine_trimestre' },
 };
 
@@ -206,4 +206,39 @@ test('a deferred idea keeps the committee run that waits for its resubmission, i
   assert.equal(ideaFromRecord({ key: idea.code, values: { ...cleared, committee_run: '{"runId":5}' } }).committeeRun, undefined);
   assert.deepEqual(ideaFromRecord({ key: idea.code, values: { ...cleared, committee_run: JSON.stringify(run) } }).committeeRun, run);
   book.setCommitteeRun('unknown', run);
+});
+
+test('a write still rate limited after the retries is re-queued, then dropped with one warning', async (t) => {
+  const warn = t.mock.method(console, 'warn', () => undefined);
+  /** Refuses the first `refusals` Idea writes with 429. */
+  const limited = (refusals: number) => {
+    const { client, calls } = fakeClient();
+    const execute = client.execute.bind(client);
+    let left = refusals;
+    (client as unknown as { execute: typeof execute }).execute = async (...args: Parameters<typeof execute>) => {
+      if (args[1].kind === 'Idea' && left-- > 0) throw new LorebaseError(429, { code: 'rate-limited' }, 'POST /operations');
+      return execute(...args);
+    };
+    return { client, calls };
+  };
+  const { client, calls } = limited(2);
+  const book = new IdeaBook(client, 'main', { ...cfg, requeues: 2 }, 's1', { changed: () => undefined });
+  const idea = await book.create('Livia', { title: 'Coda', ...full }, { at, quarter: 'Q1', signals: [], maxOpen: 3 });
+  assert.ok(typeof idea !== 'string');
+  book.review(idea.code, 'Dario', { impact: 8, feasibility: 6, novelty: 7, fit: 8, risk: 3 }, 'bene', at);
+  await book.settle();
+  assert.equal(book.writes, 2);
+  assert.equal(book.lastError, undefined);
+  assert.equal(calls.filter((c) => c.startsWith('import_records Idea')).length, 2);
+  assert.equal(warn.mock.callCount(), 0);
+
+  const dropped = limited(3);
+  const strict = new IdeaBook(dropped.client, 'main', { ...cfg, requeues: 2 }, 's1', { changed: () => undefined });
+  const lost = await strict.create('Livia', { title: 'Persa', ...full }, { at, quarter: 'Q1', signals: [], maxOpen: 3 });
+  assert.ok(typeof lost !== 'string');
+  await strict.settle();
+  assert.equal(strict.writes, 0);
+  assert.ok(strict.lastError?.includes('429'));
+  assert.equal(warn.mock.callCount(), 1);
+  assert.match(String(warn.mock.calls[0].arguments[0]), /dropped after 2 re-queues/);
 });
