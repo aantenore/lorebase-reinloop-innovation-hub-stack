@@ -23,7 +23,7 @@ jobs:
             package-lock.json
             game/package-lock.json
             web/package-lock.json
-      - name: Install (reinloop is vendored in vendor/)
+      - name: Install
         run: npm ci
       - name: Unit tests (server and mnemo)
         run: npm test

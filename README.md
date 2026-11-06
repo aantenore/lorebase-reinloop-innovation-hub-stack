@@ -6,11 +6,21 @@ products); they never build them. Every idea lives on its own branch in
 [Lorebase](https://github.com/aantenore/lorebase); an **investment committee** of agents approves it
 into `main` (the portfolio), kills it or defers it. The company policies (slots per quarter, reviewers,
 quorum, evaluation weights, the year-end freeze, careers, strategic themes) are Lorebase records: change
-one while the hub runs and the people learn of it from Lorebase's change feed. The agents run on
-[reinloop](https://github.com/aantenore/reinloop).
+one while the hub runs and the people learn of it from Lorebase's change feed. The people think on the agent stack:
+[reinloop](https://github.com/aantenore/reinloop), [agent-layers](https://github.com/aantenore/agent-layers) and
+[agent-plexus](https://github.com/aantenore/agent-plexus).
+
+| Product | What it does here |
+|---|---|
+| [Lorebase](https://github.com/aantenore/lorebase) 0.3.1 | the company's memory: policies, roles, signals and ideas as versioned records, one branch per idea, Proposals for the committee, a change feed the hub follows; Herald is its MCP server, the agents' read access |
+| [reinloop](https://github.com/aantenore/reinloop) 0.3.2 | the runtime of each agent: the model providers (Anthropic, or a local server such as Ollama), the tool loop, budgets, prompt caching |
+| [agent-layers](https://github.com/aantenore/agent-layers) 0.4.2 | one stack per person composed from `config/stacks/person.json`: model, tools, runtime and telemetry as replaceable layers, one agent per capacity (decide, reply, vote, ...) |
+| [agent-plexus](https://github.com/aantenore/agent-plexus) 0.2.1 | the group topologies: the investment committee (council with ballots and a chair, waiting for a deferred idea), squads (orchestrator), routers, chains, assemblies |
 
 Derived from [lorebase-reinloop-civilization](https://github.com/aantenore/lorebase-reinloop-civilization),
-which holds the history of the engine (real-time world, minds, groups, society, economy, god mode).
+which holds the history of the engine (real-time world, minds, groups, society, economy, god mode). This repository
+supersedes [lorebase-reinloop-innovation-hub](https://github.com/aantenore/lorebase-reinloop-innovation-hub), the
+hub's first version (a vendored reinloop, no agent-layers or agent-plexus), whose history it contains.
 
 Live runs (budget-capped, real models, web research on): [docs/run-report.md](docs/run-report.md), evidence in
 [docs/evidence/run1/](docs/evidence/run1/), [run2/](docs/evidence/run2/), [run3/](docs/evidence/run3/),
@@ -52,7 +62,8 @@ findings across runs 1-6.
   applies actions and the numbers of the policies; the client is a thin view.
 - **Prompts are minimal** ([docs/prompts.md](docs/prompts.md)): identity, role in the company, the faculties
   (a mind connected to Lorebase, a private memory) and factual perception. No tasks, no strategy, no advice.
-  Everything the agents read or say is Italian.
+  Everything the agents read or say is Italian by default (`language` in `config/sim.json`; `SIM_LANGUAGE=en`
+  switches the hub's own texts to `config/i18n/en*.json`, while the seed policies and the roster stay as written).
 - **The product is ideas.** `proponi_idea` creates `idea/<code>` and the `Idea` record; `arricchisci_idea`
   adds fields (co-authorship), `valuta_idea` is a peer review (`Review` records), `candida_al_comitato`
   opens a Proposal into `main`. The committee decides: approve (merge, the idea enters the portfolio),
@@ -133,8 +144,8 @@ flowchart LR
 Thinking runs on agent-layers and agent-plexus,
 with reinloop as the runtime of each agent and Lorebase as the knowledge. `StackHub` (`server/src/stack/`) builds one
 agent-layers stack per person from `config/stacks/person.json` (profile = tier; one agent per capacity: decide, reply,
-propose, write, vote, ballot, chair, ...), with the model (Anthropic through reinloop's provider, prompt cache and
-thinking kept), the world's tools, the Lorebase read tools (branch and domain pinned by the hub, never by the model) and
+propose, write, vote, ballot, chair, ...), with the model (`hub-reinloop`: any reinloop provider; on Anthropic the
+prompt cache and thinking are kept), the world's tools, the Lorebase read tools (branch and domain pinned by the hub, never by the model) and
 telemetry (`data/telemetry/stack.jsonl`). Group decisions are agent-plexus systems over the members' own stacks
 (`stack/topologies.ts`: orchestrator, council, router, chain, mentor, assembly; the committee is a graph that waits
 for the resubmission of a deferred idea; journal in `data/plexus/journal.db`, base config `config/plexus/base.json`).
@@ -145,35 +156,70 @@ What the stacks report (usage with cache counts and price, reasoning, finished r
 `StackFeed` to the usage ledger of the Observatory, the thoughts shown to privileged clients, the mnemo run store and a
 privileged `{type:'stack'}` WebSocket message (span totals of `agent.*` and `plexus.*`).
 
-- The stack packages come from npm (`@agent-layers/*` ^0.4.1, `@agent-plexus/*` ^0.2.0). To test unreleased sibling
-  checkouts, `npm run stack:pin` temporarily re-vendors them: it builds and packs the tarballs into `vendor/`
-  (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF=HEAD` builds the committed state) and points `package.json`
-  at them with `file:` entries. Do not commit that state: `git checkout package.json package-lock.json && rm -rf vendor`
-  and `npm install` return to the registry ranges.
-- Mock vs live: without `ANTHROPIC_API_KEY` (or with `--mock`) every stack runs on the offline `hub-mock` model, which
-  calls the same scripted decisions as before and still goes through the whole stack (tools, plexus, feed). Live uses
-  `hub-anthropic`. Files go to `stack.dataDir` (`config/game.json`, default `data/`; `HUB_DATA_DIR` replaces it).
+- The stack packages come from npm (`@agent-layers/*` ^0.4.2, `@agent-plexus/*` ^0.2.1, `reinloop` ^0.3.2). To test
+  unreleased sibling checkouts of agent-layers or agent-plexus, `npm run stack:pin` temporarily re-vendors them: it
+  builds and packs the tarballs into `vendor/` (`AGENT_LAYERS_DIR`, `AGENT_PLEXUS_DIR`; `STACK_PIN_REF=HEAD` builds
+  the committed state) and points `package.json` at them with `file:` entries. Do not commit that state:
+  `git checkout package.json package-lock.json && rm -rf vendor` and `npm install` return to the registry ranges.
+- Mock vs live is decided per provider. A run is offline (the `hub-mock` model, which calls the same scripted
+  decisions as before and still goes through the whole stack: tools, plexus, feed) when asked with `--mock` or
+  `SIM_MOCK=1`, or when a model it uses cannot be called: the Anthropic tier models without `ANTHROPIC_API_KEY`. Live
+  uses `hub-reinloop` with the model's own provider: `SIM_MODEL_OVERRIDE=ollama/qwen3:4b` runs every agent on the local
+  Ollama with no key (`OLLAMA_BASE_URL` for another host; `GAME_PROFILE=local` sizes the run for a small model). The
+  start banner and `GET /api/status` name the provider in use, or why the run is offline. Files go to `stack.dataDir`
+  (`config/game.json`, default `data/`; `HUB_DATA_DIR` replaces it).
 - Where to look: `docs/agent-stack-port.md` (design and decisions).
 
 ## Quickstart
 
-Requirements: Node >= 22.18, Docker, the `lorebase` checkout next to this one (Keeper and Herald are built
-from it). reinloop, agent-layers and agent-plexus come from npm (see Agent stack for testing unreleased checkouts).
+Requirements: Node >= 22.18 and Docker. Lorebase 0.3.1 runs from the published images
+(`ghcr.io/aantenore/lorebase` and `lorebase-ml`, linux/amd64 and linux/arm64) in the hub's own compose project
+`hub-lorebase`: Keeper on 8280, Herald on 8290, Postgres on 5543, apart from any other Lorebase on the machine. No
+Lorebase checkout is needed. reinloop 0.3.2, agent-layers 0.4.2 and agent-plexus 0.2.1 come from npm (see Agent stack
+for testing unreleased checkouts).
 
 ```bash
 npm install
 (cd services/mnemo && npm install)   # mnemo's own dependency, once
-npm run lorebase:up        # Postgres + Keeper on 127.0.0.1:8280 (deploy/lorebase.env secrets generated)
+npm run lorebase:up        # pulls the images once; Postgres + Keeper on 127.0.0.1:8280 (deploy/lorebase.env secrets generated)
 npm run lorebase:seed      # schema, policies, roles, signals, methods; breakthroughs on the hidden branch
 npm run game               # Herald (:8290, docker) + mnemo (:4510) + the hub (:4500)
 npm run game:mock          # same, offline mock provider (no model calls)
 (cd game && npm install && npm run dev)   # the isometric client on http://localhost:5184
 ```
 
-`.env` holds `ANTHROPIC_API_KEY` (models and, by default, web research) and optionally `TAVILY_API_KEY` (only for `research.provider: tavily`). Useful environment: `GAME_TIME_SCALE` (game time multiplier),
+- **Lorebase images.** `LOREBASE_VERSION` in `deploy/lorebase.settings.env` names the release; the compose file and
+  the configuration of that release are committed under `deploy/compose/` and `deploy/lorebase.yaml`
+  (`bash scripts/lorebase-up.sh sync` refreshes them from a checkout at tag `v<version>`, then commit). A one-off
+  image comes from the shell: `LOREBASE_TAG=<tag> npm run lorebase:up` (also `LOREBASE_IMAGE`, `LOREBASE_ML_IMAGE`,
+  `LOREBASE_PULL_POLICY`, `LOREBASE_CONFIG_FILE`); `deploy/lorebase.env` keeps ports and secrets only. To run a
+  checkout instead, `LOREBASE_FROM_SOURCE=1 npm run lorebase:up` builds from `../lorebase` (`LOREBASE_REPO`) with that
+  checkout's compose file and example configuration. `bash scripts/lorebase-up.sh ps|logs|down|destroy` manage the
+  project (`destroy` removes the data volume).
+- **Offline still needs Docker.** `npm run game:mock` makes no model calls but needs Keeper and Herald, and starts
+  mnemo, which downloads its embedding model (`Xenova/multilingual-e5-small`, `config/mnemo.json`, under
+  `data/models/`) on its first start. `MNEMO_URL= npm run game:mock` runs without mnemo (no private memory, the
+  society is not kept across restarts). Without `ANTHROPIC_API_KEY` mnemo rewrites memories with a heuristic instead
+  of a model.
+- **A free live run on a local model.** `SIM_MODEL_OVERRIDE=ollama/qwen3:4b GAME_PROFILE=local npm run game` runs
+  every agent on the local Ollama (http://localhost:11434, `OLLAMA_BASE_URL` for another host; pull the model first).
+  The `local` profile (`config/profiles/local.json`) runs one decision at a time with long time limits, a large
+  output limit (a thinking model's reasoning counts toward it: qwen3:4b needs a few thousand tokens and two to three
+  minutes per decision on a laptop), fewer turns, no interns and the hosted web research off; any reinloop spec works
+  the same way (`openai/gpt-5-mini` with `OPENAI_API_KEY`, `lmstudio/<model>`, ...). The banner says which provider
+  runs (`provider ollama`), or why the run is offline.
+- **Time limits.** `--seconds N` stops the hub after N seconds, counted from the start even while Lorebase is still
+  awaited. The first failed connection logs `[lorebase] <url> unreachable: start it with npm run lorebase:up`; by
+  default the hub keeps retrying, `--lorebase-wait N` (or `LOREBASE_MAX_WAIT_MS`, `lorebase.maxWaitMs` in
+  `config/sim.json`) makes it give up with exit code 1 when Lorebase or its seed is not there after N seconds.
+- **Language.** `SIM_LANGUAGE` (default `it`, `language` in `config/sim.json`) picks the hub's texts in
+  `config/i18n/<language>.json` and `<language>.rt.json`; `en` is complete, the seed policies and the roster
+  personalities are written in Italian.
+
+`.env` holds `ANTHROPIC_API_KEY` (the Anthropic models and, by default, web research) and optionally `TAVILY_API_KEY` (only for `research.provider: tavily`). Useful environment: `GAME_TIME_SCALE` (game time multiplier),
 `GAME_BUDGET_USD` (model spend cap of a run; default `budget.maxUsd` = 2 in `config/game.json`; at the cap
-every mind pauses), `SIM_MODEL_OVERRIDE=haiku` (every agent on one tier), `SIM_ROSTER_FILE` (another roster),
-`GAME_CROWD` (number of interns), `GAME_PROFILE` (cost profile, `config/profiles/<name>.json`), `--seconds N` (stop after N seconds). Other variables as in the engine
+every mind pauses), `SIM_MODEL_OVERRIDE=haiku` (every agent on one tier, or on any reinloop model spec), `SIM_ROSTER_FILE` (another roster),
+`GAME_CROWD` (number of interns), `GAME_PROFILE` (cost profile, `config/profiles/<name>.json`: `economy`, `local`), `--seconds N` (stop after N seconds). Other variables as in the engine
 (`SIM_API_TOKEN`, `HERALD_URL`, `MNEMO_URL`, ...).
 
 `npm run world:reset -- --dry-run` shows what a reset would do: policies back to the seed, breakthroughs
@@ -195,6 +241,11 @@ Revision under the same name (branches and tags share one namespace; idempotent,
 | Postgres | 5543 |
 | game client (Vite) | 5184 |
 | web dashboard (Vite) | 5183 |
+
+Keeper, Herald and Postgres are the compose project `hub-lorebase` (`scripts/lorebase-up.sh`; `LOREBASE_COMPOSE_PROJECT`
+renames it), separate from any other Lorebase running on the machine; `KEEPER_HOST_PORT`, `POSTGRES_HOST_PORT` in
+`deploy/lorebase.env` and `HERALD_HOST_PORT` in `deploy/lorebase.settings.env` move the ports (then `LOREBASE_URL` and
+`HERALD_URL` for the hub).
 
 ### Default team
 
@@ -257,7 +308,9 @@ share one mind (crowd "Stagisti").
   into `config/game.json`, `sim` into `config/sim.json`, `rosterTiers` by name, `"*"` for the rest). `economy`:
   every mind on haiku, the committee chair (Livia) included; committee voters and group proposers on haiku, no interns, replan cooldowns x2 (sonnet x3), one Lorebase consultation per haiku decision,
   replies capped at 500 tokens, 8 turns per decision with at most 2 web calls (haiku) or 3 (sonnet), game clock x3
-  (`loop.timeScale`; `GAME_TIME_SCALE` still wins).
+  (`loop.timeScale`; `GAME_TIME_SCALE` still wins). `local`: for a small local model (`SIM_MODEL_OVERRIDE=ollama/<model>`):
+  one decision at a time, decision time limit 5 to 10 minutes, 8000 output tokens, 4 turns and one consultation per
+  decision, no web calls, no interns, hosted research off, game clock x3.
 - **Closing run.** A plan run that ends without `commit_plan` (or on its turn or tool-call budget) gets one closing
   run on the same conversation where only `commit_plan` answers (`decisions.closingTurn`; counted in
   `reinloop.closingRuns`, `closingCommitted`).

@@ -1,7 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-06
 
+The hub on the agent stack. Requires Lorebase 0.3.1, run from the published images (`LOREBASE_VERSION` in
+`deploy/lorebase.settings.env`), and the npm packages `reinloop` ^0.3.2, `@agent-layers/core` and
+`@agent-layers/adapters` ^0.4.2, `@agent-plexus/core` and `@agent-plexus/adapters` ^0.2.1 (the lockfile resolves
+0.3.2, 0.4.2 and 0.2.1). After upgrading run `npm run lorebase:seed` once more: the schema gains the `committee_run`
+attribute of ideas, where a deferred idea keeps its waiting committee run. This repository supersedes
+lorebase-reinloop-innovation-hub, whose history it contains; the intermediate reinloop pins listed below
+(`vendor/reinloop-*.tgz`) are replaced by the npm package.
+
+- Thinking runs on agent-layers stacks and agent-plexus systems: one stack per person from `config/stacks/person.json`
+  (profile = tier, one agent per capacity: decide, reply, propose, write, vote, ballot, chair, judge, route, lead) with
+  the model, the world's tools, the Lorebase read tools (domain and branch pinned by the hub) and telemetry
+  (`data/telemetry/stack.jsonl`); group decisions are plexus systems over the members' stacks (`stack/topologies.ts`:
+  orchestrator, council, router, chain, mentor, assembly; the committee is a graph that waits for the resubmission of
+  a deferred idea; journal in `data/plexus/journal.db`, base config `config/plexus/base.json`). Usage, reasoning,
+  finished runs and spans reach the Observatory, the privileged clients, the mnemo run store and a `{type:'stack'}`
+  WebSocket message through one `StackFeed`. Design notes in `docs/agent-stack-port.md`.
+- reinloop, agent-layers and agent-plexus come from npm; the vendored-tarball flow is gone (`reinloop:pin`,
+  `scripts/reinloop-pin.sh`). `npm run stack:pin` stays as the local tool to try unreleased agent-layers or
+  agent-plexus checkouts (not to be committed).
+- Lorebase pinned to a release instead of the sibling checkout: `npm run lorebase:up` runs
+  `ghcr.io/aantenore/lorebase` and `lorebase-ml` at `LOREBASE_VERSION` (pulled when missing) with the compose file and
+  the configuration of that release committed under `deploy/compose/` and `deploy/lorebase.yaml`
+  (`bash scripts/lorebase-up.sh sync` refreshes them from a checkout at tag `v<version>`), in the hub's own compose
+  project `hub-lorebase`. `LOREBASE_FROM_SOURCE=1` builds from `../lorebase` (`LOREBASE_REPO`) as before. The image,
+  tag, pull policy and configuration file are set by the script and the shell; a value of theirs in the local
+  `deploy/lorebase.env` is ignored (the file keeps ports and secrets).
+- Live or mock is decided per provider: a run is offline when asked (`--mock`, `SIM_MOCK=1`) or when a model it uses
+  cannot be called (the Anthropic tier models without `ANTHROPIC_API_KEY`); otherwise every stack runs on
+  `hub-reinloop`, a model port over any reinloop provider (`hub-anthropic` stays as its earlier name).
+  `SIM_MODEL_OVERRIDE=ollama/qwen3:4b` runs every agent on the local Ollama with no key, the start banner and
+  `/api/status` name the provider in use, the hosted web search turns itself off without the Anthropic key, and
+  `GAME_PROFILE=local` (`config/profiles/local.json`) sizes a run for a small local model.
+- `--seconds N` bounds a run from its start, Lorebase still awaited or not. The first failed connection logs
+  `[lorebase] <url> unreachable: start it with npm run lorebase:up`; `--lorebase-wait N`, `LOREBASE_MAX_WAIT_MS` or
+  `lorebase.maxWaitMs` in `config/sim.json` (default 0: wait forever) make the start give up with exit code 1 when
+  Lorebase or its seed is not there in time.
+- CI: the install step no longer claims a vendored reinloop (the workflow stays manual).
 - `world:reset` archives on a Lorebase tag `archive/<stamp>` instead of a branch, so resets no longer fill the Keeper's
   materialized-branch cap. `npm run lorebase:archive-to-tags` (dry run; `-- --apply`) converts existing `archive/*`
   branches to tags (deletes the branch, then tags its recorded head Revision).
@@ -83,6 +120,15 @@
 - Offline movement habits by company role (`mock.habits`) instead of engine role names.
 - Game client: idea sources as links, research bubbles and inspector section, idea people as names and
   committee votes by entity id.
+- `scripts/lorebase-up.sh`: the Keeper and Herald readiness checks and the printed URLs take `KEEPER_HOST_PORT` /
+  `HERALD_HOST_PORT` from the shell first, then the settings and env files, as compose does; a port set only in the
+  shell no longer reports a healthy Herald as not started.
+- Keeper's write rate limit is raised for the demo (`LOREBASE__KEEPER__LIMITS__RATE__WRITES__REQUESTS_PER_MINUTE=6000`,
+  `...__BURST=600` in `deploy/lorebase.settings.env`) so runs at `GAME_TIME_SCALE=20` are not throttled; the hub-owned
+  `deploy/compose.hub.yaml`, which `sync` does not touch, passes them to Keeper.
+- Idea writes still refused with HTTP 429 after their retries are re-queued with backoff (`ideas.requeues`,
+  `ideas.requeueBaseMs` in `config/game.json`) instead of being dropped; a write is dropped, with one warning, only
+  once the re-queues are exhausted.
 
 ## 0.1.0 - 2026-10-24
 

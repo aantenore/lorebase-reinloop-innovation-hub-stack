@@ -1,5 +1,5 @@
 {
-  "name": "lorebase-reinloop-innovation-hub",
+  "name": "lorebase-reinloop-innovation-hub-stack",
   "version": "0.2.0",
   "private": true,
   "description": "An innovation hub of LLM agents generating IT product ideas under company policies kept in Lorebase",
