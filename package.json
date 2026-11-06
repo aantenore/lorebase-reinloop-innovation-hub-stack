@@ -1,6 +1,6 @@
 {
   "name": "lorebase-reinloop-innovation-hub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "An innovation hub of LLM agents generating IT product ideas under company policies kept in Lorebase",
   "type": "module",
@@ -22,18 +22,17 @@
     "herald:down": "bash scripts/herald-up.sh down",
     "game:server": "node server/src/game-main.ts",
     "mnemo": "node services/mnemo/src/main.ts",
-    "reinloop:pin": "bash scripts/reinloop-pin.sh",
     "world:reset": "node scripts/world-reset.ts",
     "lorebase:archive-to-tags": "node scripts/archive-to-tags.ts",
     "idea:validate": "node scripts/validate-idea.ts",
     "stack:pin": "bash scripts/stack-pin.sh"
   },
   "dependencies": {
-    "@agent-layers/adapters": "^0.4.1",
-    "@agent-layers/core": "^0.4.1",
-    "@agent-plexus/adapters": "^0.2.0",
-    "@agent-plexus/core": "^0.2.0",
-    "reinloop": "^0.3.1",
+    "@agent-layers/adapters": "^0.4.2",
+    "@agent-layers/core": "^0.4.2",
+    "@agent-plexus/adapters": "^0.2.1",
+    "@agent-plexus/core": "^0.2.1",
+    "reinloop": "^0.3.2",
     "ws": "^8.22.0"
   }
 }

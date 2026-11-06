@@ -3,7 +3,7 @@
 Target: the realtime game path (server/src/game-main.ts + server/src/rt/*); server/src/sim/ is legacy and stays untouched. Paths below are relative to the repository root.
 
 ## Dependencies
-- Published on npm and used through registry ranges: `@agent-layers/core` and `@agent-layers/adapters` `^0.4.1`, `@agent-plexus/core` and `@agent-plexus/adapters` `^0.2.0`, `reinloop` `^0.3.1`.
+- Published on npm and used through registry ranges: `@agent-layers/core` and `@agent-layers/adapters` `^0.4.2`, `@agent-plexus/core` and `@agent-plexus/adapters` `^0.2.1`, `reinloop` `^0.3.2`.
 - `npm run stack:pin` (scripts/stack-pin.sh) is the way to test unreleased sibling checkouts: it temporarily re-vendors them (builds and packs tarballs into `vendor/` from `AGENT_LAYERS_DIR` / `AGENT_PLEXUS_DIR`; `STACK_PIN_REF` builds a committed ref instead of the working tree) and rewrites package.json with `file:` entries. Do not commit that state; restore with `git checkout package.json package-lock.json`, remove `vendor/` and `npm install`.
 - reinloop is the version the agent-layers reinloop adapter takes as its optional peer: one copy for the hub and the adapter.
 
